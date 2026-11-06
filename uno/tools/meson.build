@@ -8,7 +8,7 @@ uno_headers += [files(
     'Logger.hpp',
     'Symbols.hpp',
     'DynamicLoader.hpp',
-    'Timer.hpp')
+    'Timer.hpp', 'InterruptHandler.hpp')
 ]
 
-uno_sources += [files('DynamicLoader.cpp','Logger.cpp', 'Statistics.cpp', 'Timer.cpp')]
+uno_sources += [files('DynamicLoader.cpp','Logger.cpp', 'Statistics.cpp', 'Timer.cpp', 'InterruptHandler.cpp')]
