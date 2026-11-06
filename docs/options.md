@@ -80,6 +80,22 @@ If not provided, the solver is chosen automatically from the available solvers (
 | `print_extended_statistics`                      | bool   | false   | Whether the statistics table is printed in extended form                  |    
 | `write_solution_to_file`                         | bool   | `false` | Whether the solution is printed to a file (used by AMPL and CUTEst)       |
 
+## KKT system dump
+
+Uno can dump the KKT systems to disk in [MatrixMarket](https://math.nist.gov/MatrixMarket/formats.html) format.
+The dump is only supported in the absence of low-rank corrections, where the whole KKT matrix is factorized directly.
+Two runs on the same instance overwrite each other.
+
+| Option               | Type    | Default | Description                                                                                       |
+|:---------------------|:--------|:--------|:--------------------------------------------------------------------------------------------------|
+| `dump_kkt_path`      | string  | `""`    | Output directory for the dumped KKT systems (created if needed). An empty path disables the dump |
+| `dump_kkt_frequency` | integer | 1       | Dump the first optimality iteration and every `frequency` one after it (`1` = every iteration)   |
+
+For each dumped iteration, two files are written to `dump_kkt_path`:
+
+- `kkt_<instance>_it<iter>.mtx` — the regularized augmented matrix (lower triangle, `coordinate real symmetric`, 1-based indexing);
+- `kkt_<instance>_it<iter>_rhs.mtx` — the right-hand side (`array real general`).
+
 ## Globalization strategy options
 
 | Option                     | Type   | Default | Description                                                                                                 |
@@ -97,9 +113,10 @@ If not provided, the solver is chosen automatically from the available solvers (
 
 ## Merit function options
 
-| Option                                     | Type    | Default | Description                             |
-| :---                                       | :---    | :---    |:----------------------------------------|
-| `sufficient_infeasibility_decrease_ratio`  | double  | 0.9     | Sufficient infeasibility decrease ratio |
+| Option                                     | Type    | Default | Description                                                                                                                         |
+| :---                                       | :---    | :---    |:------------------------------------------------------------------------------------------------------------------------------------|
+| `sufficient_infeasibility_decrease_ratio`  | double  | 0.9     | Sufficient infeasibility decrease ratio                                                                                             |
+| `merit_infeasibility_reduction_fraction`   | double  | 0.1     | Fraction of the predicted infeasibility reduction that the merit function model should achieve, used to select the objective multiplier |
 
 ## Filter method options
 
@@ -109,10 +126,14 @@ If not provided, the solver is chosen automatically from the available solvers (
 | `filter_gamma`                                    | double  | 0.001   | Slope in the objective sufficient reduction condition                                  |
 | `filter_ubd`                                      | double  | 1e2     | Minimum value for the initial upper bound on the infeasibility                         |
 | `filter_fact`                                     | double  | 1.25    | Multiple of the initial infeasibility for the initial upper bound on the infeasibility |
-| `filter_capacity`                                 | integer | 50      | Maximum number of filter entries                                                       |
+| `filter_capacity`                                 | integer | 50      | Maximum number of filter entries, 0 for an unlimited (growing) filter                  |
 | `filter_sufficient_infeasibility_decrease_factor` | double  | 0.9     | Infeasibility decrease factor in the infeasibility sufficient decrease condition       |
 | `filter_reset_iteration_threshold`                | integer | 5       | Number of consecutive filter rejections before the filter is reset                     |
 | `max_number_filter_resets`                        | integer | 5       | Maximum number of filter resets                                                        |
+| `filter_ubd_raise_trigger`                        | integer | 0       | Line searches limited by the infeasibility upper bound before it is raised (0: off) |
+| `filter_ubd_raise_factor`                         | double  | 100     | Factor by which the infeasibility upper bound is raised                                |
+| `filter_ubd_max_raises`                           | integer | 4       | Maximum number of raises of the infeasibility upper bound                              |
+| `filter_merit_max_increase`                       | double  | 5       | Waechter filter: h-type trial iterates whose merit increases by more than this number of orders of magnitude are rejected |
 | `filter_margin_uses_entry_infeasibility`          | bool    | false   | Whether the filter condition on the objective uses the entry (true) or the iterate (false) infeasibility |                                                        |
 
 ## Funnel method options
@@ -134,6 +155,8 @@ If not provided, the solver is chosen automatically from the available solvers (
 | `LS_backtracking_ratio`           | double  | 0.5     | Decrease ratio of the step length for backtracking line search   |
 | `LS_scale_duals_with_step_length` | bool    | `true`  | Whether the Lagrange multipliers are scaled with the step length |
 | `gamma_alpha`                     | double  | 0.05    | Safety factor for the minimum step length                        |
+| `LS_watchdog_shortened_iterations_trigger` | integer | 10 | Number of consecutive shortened steps that triggers the watchdog (0 disables it) |
+| `LS_watchdog_max_trial_iterations` | integer | 3 | Maximum number of watchdog iterations in which the full step is accepted unchecked |
 
 ## Second-Order Corrections (SOC) options
 
@@ -156,6 +179,16 @@ If not provided, the solver is chosen automatically from the available solvers (
 | `primal_regularization_slow_increase_factor` | double  | 8.0     | Slow increase factor for the primal inertia correction coefficient                      |
 | `threshold_unsuccessful_attempts`            | integer | 8       | Number of unsuccessful attempts until inertia correction becomes more aggressive        |
 | `regularize_all_variables`                   | bool | true       | Whether all variables or only the original variables are regularized        |
+
+## Iterative refinement options
+
+| Option                                       | Type    | Default | Description                                                                             |
+| :---                                         | :---    | :---    |:----------------------------------------------------------------------------------------|
+| `iterative_refinement_min_steps` | integer | 0 | Minimum number of iterative refinement steps per linear system solve |
+| `iterative_refinement_max_steps` | integer | 10 | Maximum number of iterative refinement steps per linear system solve (0: iterative refinement disabled) |
+| `iterative_refinement_residual_ratio_max` | double | 1e-10 | Iterative refinement stops when the residual ratio is below this tolerance |
+| `iterative_refinement_residual_ratio_singular` | double | 1e-5 | Residual ratio above which the matrix is deemed singular after failed iterative refinement |
+| `iterative_refinement_improvement_factor` | double | 0.999999999 | Refinement stagnates (and stops) when the residual ratio exceeds this factor times the previous ratio. In (0, 1] |
 
 ## Quasi-Newton options
 

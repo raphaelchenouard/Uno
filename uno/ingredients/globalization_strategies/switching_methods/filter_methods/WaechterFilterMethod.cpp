@@ -1,6 +1,8 @@
 // Copyright (c) 2018-2024 Charlie Vanaret
 // Licensed under the MIT license. See LICENSE file in the project directory for details.
 
+#include <algorithm>
+#include <cmath>
 #include "WaechterFilterMethod.hpp"
 #include "Filter.hpp"
 #include "ingredients/globalization_strategies/ProgressMeasures.hpp"
@@ -14,17 +16,23 @@ namespace uno {
    WaechterFilterMethod::WaechterFilterMethod(const Options& options):
          FilterMethod(options),
          sufficient_infeasibility_decrease_factor(options.get_double("filter_sufficient_infeasibility_decrease_factor")),
-         small_infeasibility_factor(options.get_double("barrier_small_infeasibility_factor")),
          filter_reset_iteration_threshold(options.get_unsigned_int("filter_reset_iteration_threshold")),
-         max_number_filter_resets(options.get_unsigned_int("max_number_filter_resets")) {
+         max_number_filter_resets(options.get_unsigned_int("max_number_filter_resets")),
+         upper_bound_raise_trigger(options.get_unsigned_int("filter_ubd_raise_trigger")),
+         merit_max_increase(options.get_double("filter_merit_max_increase")),
+         upper_bound_raise_factor(options.get_double("filter_ubd_raise_factor")),
+         max_number_upper_bound_raises(options.get_unsigned_int("filter_ubd_max_raises")) {
    }
 
    void WaechterFilterMethod::initialize(Statistics& statistics, const Iterate& initial_iterate) {
       this->initial_infeasibility = initial_iterate.progress.infeasibility;
       FilterMethod::initialize(statistics, initial_iterate);
+      // the upper bound was (re)initialized: restart the adaptive mechanism
+      this->number_upper_bound_raises = 0;
+      this->upper_bound_limited_step_streak = 0;
    }
 
-   bool WaechterFilterMethod::is_iterate_acceptable(Statistics& statistics, const ProgressMeasures& current_progress,
+   Decision WaechterFilterMethod::is_iterate_acceptable(Statistics& statistics, const ProgressMeasures& current_progress,
          const ProgressMeasures& trial_progress, const ProgressMeasures& predicted_reductions, double /*objective_multiplier*/) {
       // in filter methods, we construct an unconstrained measure by ignoring infeasibility and scaling the objective measure by 1
       const double current_merit = unconstrained_merit_function(current_progress);
@@ -38,15 +46,14 @@ namespace uno {
       if (!this->filter.acceptable_wrt_infeasibility_upper_bound(trial_progress.infeasibility)) {
          DEBUG << "Trial iterate not acceptable wrt infeasibility upper bound\n";
          statistics.set("Status", std::string(symbols::fail) + " (upper bound)");
-         return false;
+         return Decision::reject(RejectionReason::INFEASIBILITY_UPPER_BOUND);
       }
       // now acceptable wrt infeasibility upper bound
 
-      const double actual_merit_reduction = this->compute_actual_merit_reduction(current_merit, trial_merit);
+      const double actual_merit_reduction = this->compute_actual_reduction(current_merit, trial_merit);
       DEBUG << "Unconstrained actual reduction = " << actual_merit_reduction << '\n';
 
-      const bool small_infeasibility = current_progress.infeasibility <= this->small_infeasibility_factor *
-         std::max(1., this->initial_infeasibility);
+      const bool small_infeasibility = current_progress.infeasibility <= this->small_infeasibility_threshold();
       const bool switching = (0. < merit_predicted_reduction) && this->switching_condition(merit_predicted_reduction,
          predicted_reductions.step_length, current_progress.infeasibility);
       const bool sufficient_decrease = this->armijo_sufficient_decrease(merit_predicted_reduction, actual_merit_reduction);
@@ -63,11 +70,22 @@ namespace uno {
             DEBUG << "Armijo condition not satisfied\n";
             statistics.set("Status", std::string(symbols::fail) + " (Armijo)");
             this->last_rejection_due_to_filter = false;
-            return false;
+            return Decision::reject(RejectionReason::SUFFICIENT_DECREASE);
          }
       }
       else {
          DEBUG << "Switching condition violated\n";
+         // IPOPT (obj_max_inc): reject a merit that increases by too many orders of magnitude, otherwise a reduction of
+         // the infeasibility can be traded for an astronomical increase of the objective
+         if (current_merit < trial_merit) {
+            const double magnitude = (10. < std::abs(current_merit)) ? std::log10(std::abs(current_merit)) : 1.;
+            if (this->merit_max_increase + magnitude < std::log10(trial_merit - current_merit)) {
+               DEBUG << "Trial iterate (h-type) rejected: the merit increases too rapidly\n";
+               statistics.set("Status", std::string(symbols::fail) + " (merit increase)");
+               this->last_rejection_due_to_filter = false;
+               return Decision::reject(RejectionReason::CURRENT_ITERATE);
+            }
+         }
          if (this->filter.acceptable_wrt_current_iterate(current_progress.infeasibility, current_merit,
                trial_progress.infeasibility, trial_merit)) {
             DEBUG << "Trial iterate (h-type) acceptable with respect to current point\n";
@@ -77,7 +95,7 @@ namespace uno {
             DEBUG << "Trial iterate (h-type) not acceptable with respect to current point\n";
             statistics.set("Status", std::string(symbols::fail) + " (current)");
             this->last_rejection_due_to_filter = false;
-            return false;
+            return Decision::reject(RejectionReason::CURRENT_ITERATE);
          }
       }
 
@@ -86,7 +104,7 @@ namespace uno {
          DEBUG << "Trial iterate not filter acceptable\n";
          statistics.set("Status", std::string(symbols::fail) + " (filter)");
          this->last_rejection_due_to_filter = true;
-         return false;
+         return Decision::reject(RejectionReason::FILTER);
       }
       // now filter acceptable
 
@@ -115,15 +133,52 @@ namespace uno {
          DEBUG << "Adding current iterate to the filter\n";
          this->filter.add(current_progress.infeasibility, current_merit);
       }
-      return true;
+      return Decision::accept();
+   }
+
+   // a step limited by the upper bound only: its trial iterates were all rejected by the upper bound, except possibly
+   // the last one (the accepted step is shorter only because of the upper bound)
+   void WaechterFilterMethod::notify_step_limited_by(RejectionReason sole_rejection_reason) {
+      if (sole_rejection_reason != RejectionReason::INFEASIBILITY_UPPER_BOUND) {
+         this->upper_bound_limited_step_streak = 0;
+         return;
+      }
+      ++this->upper_bound_limited_step_streak;
+      if (0 < this->upper_bound_raise_trigger && this->upper_bound_raise_trigger <= this->upper_bound_limited_step_streak) {
+         this->raise_infeasibility_upper_bound();
+      }
+   }
+
+   void WaechterFilterMethod::raise_infeasibility_upper_bound() {
+      if (this->max_number_upper_bound_raises <= this->number_upper_bound_raises || this->upper_bound_raise_factor <= 1.) {
+         return;
+      }
+      const double old_upper_bound = this->filter.get_infeasibility_upper_bound();
+      const double new_upper_bound = this->upper_bound_raise_factor * old_upper_bound;
+      if (!is_finite(new_upper_bound)) {
+         return;
+      }
+      // the raised value is also the one restored upon filter reset
+      this->filter.set_infeasibility_upper_bound(new_upper_bound);
+      ++this->number_upper_bound_raises;
+      this->upper_bound_limited_step_streak = 0;
+      INFO << "Filter: infeasibility upper bound raised from " << old_upper_bound << " to " << new_upper_bound << " (raise " <<
+         this->number_upper_bound_raises << " of " << this->max_number_upper_bound_raises << "): " << this->upper_bound_raise_trigger <<
+         " consecutive steps limited by the upper bound\n";
    }
 
    bool WaechterFilterMethod::is_infeasibility_sufficiently_reduced(const Iterate& trial_iterate, double reference_infeasibility) const {
-      // use the infeasibility in the residual norm here (inf norm for IPOPT implementation)
+      // primal infeasibility (residual norm), the same measure as the reference infeasibility
       DEBUG << "Testing whether " << trial_iterate.scaled_residuals.primal_infeasibility << " <= " << this->sufficient_infeasibility_decrease_factor
          << "*" << reference_infeasibility << " = " << this->sufficient_infeasibility_decrease_factor * reference_infeasibility << '\n';
       return trial_iterate.scaled_residuals.primal_infeasibility <= this->sufficient_infeasibility_decrease_factor * reference_infeasibility &&
          this->filter.filter_acceptable(trial_iterate.progress.infeasibility, unconstrained_merit_function(trial_iterate.progress));
+   }
+
+   // IPOPT: theta_min = theta_min_fact * max(1, theta(x_0)), where x_0 is the point at which this filter was initialized
+   // (the initial point, or the first restoration iterate for the restoration filter)
+   double WaechterFilterMethod::small_infeasibility_threshold() const {
+      return this->small_infeasibility_factor * std::max(1., this->initial_infeasibility);
    }
 
    std::string WaechterFilterMethod::get_name() const {

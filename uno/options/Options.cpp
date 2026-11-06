@@ -55,6 +55,7 @@ namespace uno {
       {"switching_merit_exponent", OptionType::DOUBLE},
       {"switching_infeasibility_exponent", OptionType::DOUBLE},
       {"sufficient_infeasibility_decrease_ratio", OptionType::DOUBLE},
+      {"merit_infeasibility_reduction_fraction", OptionType::DOUBLE},
       {"filter_beta", OptionType::DOUBLE},
       {"filter_gamma", OptionType::DOUBLE},
       {"filter_ubd", OptionType::DOUBLE},
@@ -63,6 +64,10 @@ namespace uno {
       {"filter_sufficient_infeasibility_decrease_factor", OptionType::DOUBLE},
       {"filter_reset_iteration_threshold", OptionType::INTEGER},
       {"max_number_filter_resets", OptionType::INTEGER},
+      {"filter_ubd_raise_trigger", OptionType::INTEGER},
+      {"filter_ubd_raise_factor", OptionType::DOUBLE},
+      {"filter_ubd_max_raises", OptionType::INTEGER},
+      {"filter_merit_max_increase", OptionType::DOUBLE},
       {"filter_margin_uses_entry_infeasibility", OptionType::BOOL},
       {"funnel_kappa", OptionType::DOUBLE},
       {"funnel_beta", OptionType::DOUBLE},
@@ -74,6 +79,8 @@ namespace uno {
       {"LS_backtracking_ratio", OptionType::DOUBLE},
       {"LS_scale_duals_with_step_length", OptionType::BOOL},
       {"gamma_alpha", OptionType::DOUBLE},
+      {"LS_watchdog_shortened_iterations_trigger", OptionType::INTEGER},
+      {"LS_watchdog_max_trial_iterations", OptionType::INTEGER},
       {"quasi_newton_memory_size", OptionType::INTEGER},
       {"quasi_newton_delta_lower_bound", OptionType::DOUBLE},
       {"quasi_newton_delta_upper_bound", OptionType::DOUBLE},
@@ -89,6 +96,11 @@ namespace uno {
       {"primal_regularization_slow_increase_factor", OptionType::DOUBLE},
       {"threshold_unsuccessful_attempts", OptionType::INTEGER},
       {"regularize_all_variables", OptionType::BOOL},
+      {"iterative_refinement_min_steps", OptionType::INTEGER},
+      {"iterative_refinement_max_steps", OptionType::INTEGER},
+      {"iterative_refinement_residual_ratio_max", OptionType::DOUBLE},
+      {"iterative_refinement_residual_ratio_singular", OptionType::DOUBLE},
+      {"iterative_refinement_improvement_factor", OptionType::DOUBLE},
       {"TR_radius", OptionType::DOUBLE},
       {"TR_increase_factor", OptionType::DOUBLE},
       {"TR_decrease_factor", OptionType::DOUBLE},
@@ -129,6 +141,8 @@ namespace uno {
       {"SOC_infeasibility_fraction", OptionType::DOUBLE},
       {"libhsl_path", OptionType::STRING},
       {"MA57_use_scaling", OptionType::BOOL},
+      {"dump_kkt_path", OptionType::STRING},
+      {"dump_kkt_frequency", OptionType::INTEGER},
    };
 
    // setters
@@ -147,9 +161,9 @@ namespace uno {
       this->values[option_name] = option_value;
    }
 
-   void Options::set_string(const std::string& option_name, const std::string& option_value) {
+   void Options::set_string(const std::string& option_name, std::string option_value) {
       check_option_type(option_name, OptionType::STRING);
-      this->values[option_name] = option_value;
+      this->values[option_name] = std::move(option_value);
    }
 
    namespace {
@@ -195,7 +209,7 @@ namespace uno {
    }
 
    // setter for option with unknown type
-   void Options::set(const std::string& option_name, const std::string& option_value) {
+   void Options::set(const std::string& option_name, std::string option_value) {
       const auto type = option_types.find(option_name);
       if (type == option_types.end()) {
          throw std::out_of_range("The option with name " + option_name + " does not exist");
@@ -211,7 +225,7 @@ namespace uno {
             this->set_bool(option_name, parse_bool(option_name, option_value));
             break;
          case OptionType::STRING:
-            this->set_string(option_name, option_value);
+            this->set_string(option_name, std::move(option_value));
             break;
       }
    }
@@ -296,17 +310,19 @@ namespace uno {
          if (position == std::string::npos) {
             throw std::runtime_error("The option " + argument + " does not contain the delimiter " + delimiter);
          }
-         const std::string option_name = argument.substr(0, position);
-         const std::string option_value = argument.substr(position + 1);
-         command_line_options.emplace_back(option_name, option_value);
+         std::string option_name = argument.substr(0, position);
+         std::string option_value = argument.substr(position + 1);
+         command_line_options.emplace_back(std::move(option_name), std::move(option_value));
       }
       return command_line_options;
    }
 
-   void trim(std::string& string) {
-      string.erase(0, string.find_first_not_of(" \n\r\t"));
-      string.erase(string.find_last_not_of(" \n\r\t")+1);
-   }
+	namespace {
+		void trim(std::string& string) {
+			string.erase(0, string.find_first_not_of(" \n\r\t"));
+			string.erase(string.find_last_not_of(" \n\r\t")+1);
+		}
+	}
 
    void Options::load_option_file(Options& options, const std::string& file_name) {
       std::ifstream file(file_name);
@@ -331,7 +347,7 @@ namespace uno {
          if (!(stream >> option_name >> option_value) || (stream >> extra_token)) {
             throw std::invalid_argument("Malformed line " + std::to_string(line_number) + " in option file " + file_name + ": " + line);
          }
-         options.set(option_name, option_value);
+         options.set(option_name, std::move(option_value));
       }
       file.close();
    }

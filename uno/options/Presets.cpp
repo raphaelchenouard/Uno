@@ -5,6 +5,8 @@
 #include "Presets.hpp"
 #include "Options.hpp"
 #include "model/Model.hpp"
+#include "ingredients/subproblem_solvers/QPSolverFactory.hpp"
+#include "ingredients/subproblem_solvers/SymmetricIndefiniteLinearSolverFactory.hpp"
 
 namespace uno {
    Preset Presets::from_string(const std::string& preset) {
@@ -29,6 +31,19 @@ namespace uno {
       constexpr size_t large_problem_dimension = 2000;       // n + m
       constexpr size_t large_problem_nonzeros = 50'000;      // Jacobian + Hessian nnz
       // constexpr size_t many_inequalities_floor = 500;        // absolute floor for the ratio rule
+
+      // the preset must be supported by the available subproblem solvers
+      const bool has_QP_solver = (0 < QPSolverFactory::available_solvers.size());
+      const bool has_linear_solver = !SymmetricIndefiniteLinearSolverFactory::available_solvers().empty();
+      if (!has_QP_solver && !has_linear_solver) {
+         throw std::runtime_error("The auto preset requires a QP solver or a linear solver, but none is available");
+      }
+      if (!has_QP_solver) {
+         return Preset::IPOPT;
+      }
+      if (!has_linear_solver) {
+         return Preset::FILTERSQP;
+      }
 
       const size_t total_dimension = model.number_variables + model.number_constraints;
       size_t total_nonzeros = model.number_jacobian_nonzeros();
@@ -86,8 +101,10 @@ namespace uno {
          options.set_double("filter_gamma", 1e-8);
          options.set_bool("filter_margin_uses_entry_infeasibility", true);
          options.set_double("switching_delta", 1);
+         options.set_integer("filter_capacity", 0); // unlimited
          options.set_double("filter_ubd", 1e4);
          options.set_double("filter_fact", 1e4);
+         options.set_integer("filter_ubd_raise_trigger", 3);
          options.set_double("switching_merit_exponent", 2.3);
          options.set_double("switching_infeasibility_exponent", 1.1);
          options.set_double("armijo_decrease_fraction", 1e-8);

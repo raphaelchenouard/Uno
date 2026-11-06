@@ -61,6 +61,7 @@ integer(uno_int), parameter :: UNO_TIME_LIMIT        = 2
 integer(uno_int), parameter :: UNO_EVALUATION_ERROR  = 3
 integer(uno_int), parameter :: UNO_ALGORITHMIC_ERROR = 4
 integer(uno_int), parameter :: UNO_USER_TERMINATION  = 5
+integer(uno_int), parameter :: UNO_USER_INTERRUPTION = 6
 
 !---------------------------------------------
 ! Iterate status
@@ -79,7 +80,7 @@ integer(uno_int), parameter :: UNO_UNBOUNDED_OBJECTIVE         = 7
 !---------------------------------------------
 integer(uno_int), parameter :: UNO_VERSION_MAJOR = 2
 integer(uno_int), parameter :: UNO_VERSION_MINOR = 9
-integer(uno_int), parameter :: UNO_VERSION_PATCH = 0
+integer(uno_int), parameter :: UNO_VERSION_PATCH = 3
 
 !---------------------------------------------
 ! uno_objective_callback

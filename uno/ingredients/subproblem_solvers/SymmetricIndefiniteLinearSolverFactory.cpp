@@ -50,7 +50,9 @@ namespace uno {
 #endif
 #if defined(HAS_HSL) || defined(HAS_MA57)
       if (linear_solver == "MA57"
-   #ifdef HAS_HSL
+   #if defined(HSL_RUNTIME_LOADING)
+         && ma57_symbols_available()
+   #elif defined(HAS_HSL)
          && LIBHSL_isfunctional()
    #endif
             ) {
@@ -60,9 +62,11 @@ namespace uno {
 
 #if defined(HAS_HSL) || defined(HAS_MA27)
       if (linear_solver == "MA27"
-   # ifdef HAS_HSL
+   #if defined(HSL_RUNTIME_LOADING)
+         && ma27_symbols_available()
+   #elif defined(HAS_HSL)
          && LIBHSL_isfunctional()
-   # endif
+   #endif
       ) {
          return std::make_unique<MA27Solver>();
       }
@@ -90,6 +94,21 @@ namespace uno {
          return std::make_unique<SSIDSSolver>();
       }
 #endif
+      // the HSL solver is supported by this build, but the HSL library is not functional
+      bool supported_hsl_solver = false;
+#if defined(HAS_HSL) || defined(HAS_MA57)
+      supported_hsl_solver = supported_hsl_solver || (linear_solver == "MA57");
+#endif
+#if defined(HAS_HSL) || defined(HAS_MA27)
+      supported_hsl_solver = supported_hsl_solver || (linear_solver == "MA27");
+#endif
+#ifdef HAS_MA86
+      supported_hsl_solver = supported_hsl_solver || (linear_solver == "MA86");
+#endif
+      if (supported_hsl_solver) {
+         throw std::invalid_argument("The linear solver " + linear_solver + " was requested, but the HSL library is not "
+            "functional or does not provide it (with runtime loading, check libhsl_path or the UNO_HSL_LIBRARY environment variable)");
+      }
       std::string message = "The linear solver ";
       message.append(linear_solver).append(" is unknown").append("\n").append("The following values are available: ")
             .append(join(SymmetricIndefiniteLinearSolverFactory::available_solvers(), ", "));
@@ -99,11 +118,19 @@ namespace uno {
    // return the list of available solvers
    std::vector<std::string> SymmetricIndefiniteLinearSolverFactory::available_solvers() {
       std::vector<std::string> solvers{};
-#ifdef HAS_HSL
+#if defined(HSL_RUNTIME_LOADING)
+      // the runtime library may provide only some of the solvers (e.g. MA27 only, from the HSL Archive)
+      if (ma57_symbols_available()) {
+         solvers.emplace_back("MA57");
+      }
+      if (ma27_symbols_available()) {
+         solvers.emplace_back("MA27");
+      }
+#elif defined(HAS_HSL)
       if (LIBHSL_isfunctional()) {
-            solvers.emplace_back("MA57");
-            solvers.emplace_back("MA27");
-         }
+         solvers.emplace_back("MA57");
+         solvers.emplace_back("MA27");
+      }
 #else
    #ifdef HAS_MA57
       solvers.emplace_back("MA57");

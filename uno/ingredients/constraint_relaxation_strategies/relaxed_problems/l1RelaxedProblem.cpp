@@ -13,16 +13,17 @@
 
 namespace uno {
    l1RelaxedProblem::l1RelaxedProblem(const Model& model, double objective_multiplier, double constraint_violation_coefficient,
-         bool relax_linear_constraints, bool use_proximal_term):
+         bool relax_linear_constraints, bool use_proximal_term, double residual_scaling_threshold):
       // call delegating constructor
       l1RelaxedProblem(model, ElasticVariables::generate(model, relax_linear_constraints), objective_multiplier,
-         constraint_violation_coefficient, use_proximal_term) {
+         constraint_violation_coefficient, use_proximal_term, residual_scaling_threshold) {
    }
 
    // delegating constructor
    l1RelaxedProblem::l1RelaxedProblem(const Model& model, ElasticVariables&& elastic_variables, double objective_multiplier,
-            double constraint_violation_coefficient, bool use_proximal_term):
-         OptimizationProblem(model, model.number_variables + elastic_variables.size(), model.number_constraints),
+            double constraint_violation_coefficient, bool use_proximal_term, double residual_scaling_threshold):
+         OptimizationProblem(model, model.number_variables + elastic_variables.size(), model.number_constraints,
+            residual_scaling_threshold),
          constraint_violation_coefficient(constraint_violation_coefficient),
          elastic_variables(std::move(elastic_variables)),
          number_elastic_variables(this->elastic_variables.size()),
@@ -72,8 +73,15 @@ namespace uno {
       return true;
    }
 
-   void l1RelaxedProblem::set_proximal_coefficient(double proximal_coefficient) {
-      this->proximal_coefficient = proximal_coefficient;
+   void l1RelaxedProblem::postprocess_solution(Iterate& iterate, Evaluations& evaluations) const {
+      // remove the elastics
+      iterate.set_dimensions(this->model.number_variables, this->model.number_constraints);
+
+      this->model.postprocess_solution(iterate, evaluations);
+   }
+
+   void l1RelaxedProblem::set_proximal_coefficient(double new_proximal_coefficient) {
+      this->proximal_coefficient = new_proximal_coefficient;
    }
 
    void l1RelaxedProblem::set_proximal_center(View<const double> point) {
@@ -126,9 +134,9 @@ namespace uno {
 
    void l1RelaxedProblem::evaluate_constraints(const Iterate& iterate, View<double> constraints, Evaluations& evaluations) const {
       evaluations.evaluate_constraints(this->model, iterate.primals);
-      for (size_t index: Range(this->number_constraints)) {
-         constraints[index] = evaluations.constraints[index];
-      }
+      // copy the constraints at the beginning of the "constraints" vector
+      view(constraints, 0, this->number_constraints) = evaluations.constraints;
+      view(constraints, this->number_constraints, constraints.size()).fill(0.);
 
       // add the contribution of the elastic variables
       for (const auto [constraint_index, elastic_index]: this->elastic_variables.positive) {
@@ -143,14 +151,12 @@ namespace uno {
       // scale nabla f(x) by rho
       if (this->objective_multiplier != 0.) {
          evaluations.evaluate_objective_gradient(this->model, iterate.primals);
-         for (size_t index: Range(this->model.number_variables)) {
-            objective_gradient[index] = this->objective_multiplier * evaluations.objective_gradient[index];
-         }
+         // copy the objective gradient at the beginning of the "objective_gradient" vector
+         view(objective_gradient, 0, this->model.number_variables) = this->objective_multiplier * evaluations.objective_gradient;
+         view(objective_gradient, this->model.number_variables, objective_gradient.size()).fill(0.);
       }
       else {
-         for (size_t index: Range(this->model.number_variables)) {
-            objective_gradient[index] = 0.;
-         }
+         objective_gradient.fill(0.);
       }
 
       // constraint violation (through elastic variables) contribution
@@ -170,53 +176,51 @@ namespace uno {
 
    void l1RelaxedProblem::evaluate_jacobian(const Vector<double>& primals, View<double> jacobian_values, Evaluations& evaluations) const {
       evaluations.evaluate_jacobian(this->model, primals);
-      for (size_t nonzeros_index: Range(this->model.number_jacobian_nonzeros())) {
-         jacobian_values[nonzeros_index] = evaluations.jacobian_values[nonzeros_index];
-      }
+      // copy the Jacobian at the beginning of the "jacobian_values" vector
+      const size_t number_jacobian_nonzeros = this->model.number_jacobian_nonzeros();
+      view(jacobian_values, 0, number_jacobian_nonzeros) = evaluations.jacobian_values;
 
       // add the contribution of the elastic variables
-      size_t nonzero_index = this->model.number_jacobian_nonzeros();
-      for ([[maybe_unused]] const auto _: this->elastic_variables.positive) {
-         jacobian_values[nonzero_index] = -1.;
-         ++nonzero_index;
-      }
-      for ([[maybe_unused]] const auto _: this->elastic_variables.negative) {
-         jacobian_values[nonzero_index] = 1.;
-         ++nonzero_index;
-      }
+      const size_t end_positive = number_jacobian_nonzeros + this->elastic_variables.positive.size();
+      const size_t end_negative = end_positive + this->elastic_variables.negative.size();
+      view(jacobian_values, number_jacobian_nonzeros, end_positive).fill(-1.);
+      view(jacobian_values, end_positive, end_negative).fill(1.);
+
+      // zero out the rest
+      view(jacobian_values, end_negative, jacobian_values.size()).fill(0.);
    }
 
    // Lagrangian gradient split in two parts: objective contribution and constraints' contribution
-   void l1RelaxedProblem::evaluate_lagrangian_gradient(const Iterate& iterate, Evaluations& evaluations,
-         Vector<double>& lagrangian_gradient) const {
+   void l1RelaxedProblem::evaluate_lagrangian_gradient(const Vector<double>& primals, const Vector<double>& constraint_multipliers,
+         const Vector<double>& lower_bound_multipliers, const Vector<double>& upper_bound_multipliers, Evaluations& evaluations,
+         View<double> lagrangian_gradient) const {
       lagrangian_gradient.fill(0.);
 
       // ∇c(x_k) λ_k
-      evaluations.evaluate_jacobian(this->model, iterate.primals);
-      evaluations.add_jacobian_transposed_vector_product(this->model, iterate.multipliers.constraints.view(),
-         lagrangian_gradient.view());
+      evaluations.evaluate_jacobian(this->model, primals);
+      evaluations.add_jacobian_transposed_vector_product(this->model, constraint_multipliers.view(),
+         lagrangian_gradient);
       lagrangian_gradient.scale(-1.);
 
       // z_k
       for (size_t variable_index: Range(this->model.number_variables)) {
-         lagrangian_gradient[variable_index] -= (iterate.multipliers.lower_bounds[variable_index] +
-            iterate.multipliers.upper_bounds[variable_index]);
+         lagrangian_gradient[variable_index] -= (lower_bound_multipliers[variable_index] + upper_bound_multipliers[variable_index]);
       }
 
       // ρ f(x_k)
       if (this->objective_multiplier != 0.) {
-         evaluations.evaluate_objective_gradient(this->model, iterate.primals);
+         evaluations.evaluate_objective_gradient(this->model, primals);
          view(lagrangian_gradient, 0, this->model.number_variables) += this->objective_multiplier * evaluations.objective_gradient;
       }
 
       // elastic variables
       for (const auto [constraint_index, elastic_index]: this->elastic_variables.positive) {
          lagrangian_gradient[elastic_index] += this->constraint_violation_coefficient +
-            iterate.multipliers.constraints[constraint_index] - iterate.multipliers.lower_bounds[elastic_index];
+            constraint_multipliers[constraint_index] - lower_bound_multipliers[elastic_index];
       }
       for (const auto [constraint_index, elastic_index]: this->elastic_variables.negative) {
          lagrangian_gradient[elastic_index] += this->constraint_violation_coefficient -
-            iterate.multipliers.constraints[constraint_index] - iterate.multipliers.lower_bounds[elastic_index];
+            constraint_multipliers[constraint_index] - lower_bound_multipliers[elastic_index];
       }
 
       // proximal contribution
@@ -224,8 +228,7 @@ namespace uno {
          for (size_t variable_index: Range(this->model.number_variables)) {
             const double scaling = std::min(1., 1./std::abs(this->proximal_center[variable_index]));
             const double proximal_term = this->proximal_coefficient * scaling * scaling;
-            lagrangian_gradient[variable_index] += proximal_term * (iterate.primals[variable_index] -
-               this->proximal_center[variable_index]);
+            lagrangian_gradient[variable_index] += proximal_term * (primals[variable_index] - this->proximal_center[variable_index]);
          }
       }
    }
@@ -297,56 +300,58 @@ namespace uno {
       // bound constraints
       const auto& variables_lower_bounds = this->model.get_variables_lower_bounds();
       const auto& variables_upper_bounds = this->model.get_variables_upper_bounds();
-      Vector<double> variable_complementarity(this->model.number_variables, 0.); // TODO preallocate
-      for (size_t variable_index: Range(this->model.number_variables)) {
-         double result = 0.;
+      const auto variable_lower_bound_complementarity = [&](size_t variable_index) {
          if (is_finite(variables_lower_bounds[variable_index])) {
-            result = std::max(result, std::abs(multipliers.lower_bounds[variable_index] *
-               (primals[variable_index] - variables_lower_bounds[variable_index])));
+            return multipliers.lower_bounds[variable_index] * (primals[variable_index] - variables_lower_bounds[variable_index]);
          }
+         return 0.;
+      };
+      const auto variable_upper_bound_complementarity = [&](size_t variable_index) {
          if (is_finite(variables_upper_bounds[variable_index])) {
-            result = std::max(result, std::abs(multipliers.upper_bounds[variable_index] *
-               (primals[variable_index] - variables_upper_bounds[variable_index])));
+            return multipliers.upper_bounds[variable_index] * (primals[variable_index] - variables_upper_bounds[variable_index]);
          }
-         variable_complementarity[variable_index] = result;
-      }
+         return 0.;
+      };
 
       // constraints
       const auto& constraints_lower_bounds = this->get_constraints_lower_bounds();
       const auto& constraints_upper_bounds = this->get_constraints_upper_bounds();
-      Vector<double> constraint_complementarity(this->model.number_constraints, 0.); // TODO preallocate
-      for (size_t constraint_index: Range(this->model.number_constraints)) {
+      const auto constraint_complementarity = [&](size_t constraint_index) {
          // violated constraints
          if (constraints[constraint_index] < constraints_lower_bounds[constraint_index]) {
-            constraint_complementarity[constraint_index] = (multipliers.constraints[constraint_index] - this->constraint_violation_coefficient) *
+            return (multipliers.constraints[constraint_index] - this->constraint_violation_coefficient) *
                (constraints[constraint_index] - constraints_lower_bounds[constraint_index]);
          }
          else if (constraints_upper_bounds[constraint_index] < constraints[constraint_index]) {
-            constraint_complementarity[constraint_index] = (multipliers.constraints[constraint_index] + this->constraint_violation_coefficient) *
+            return (multipliers.constraints[constraint_index] + this->constraint_violation_coefficient) *
                (constraints[constraint_index] - constraints_upper_bounds[constraint_index]);
          }
          // the constraint is satisfied
          // free constraint: no complementarity pair, the multiplier must vanish
          else if (is_infinite(constraints_lower_bounds[constraint_index]) && is_infinite(constraints_upper_bounds[constraint_index])) {
-            constraint_complementarity[constraint_index] = multipliers.constraints[constraint_index];
+            return multipliers.constraints[constraint_index];
          }
          // if constraint is one-sided, pick that bound
          else if (is_finite(constraints_lower_bounds[constraint_index]) && is_infinite(constraints_upper_bounds[constraint_index])) {
-            constraint_complementarity[constraint_index] = multipliers.constraints[constraint_index] * (constraints[constraint_index] - constraints_lower_bounds[constraint_index]);
+            return multipliers.constraints[constraint_index] * (constraints[constraint_index] - constraints_lower_bounds[constraint_index]);
          }
          else if (is_finite(constraints_upper_bounds[constraint_index]) && is_infinite(constraints_lower_bounds[constraint_index])) {
-            constraint_complementarity[constraint_index] = multipliers.constraints[constraint_index] * (constraints[constraint_index] - constraints_upper_bounds[constraint_index]);
+            return multipliers.constraints[constraint_index] * (constraints[constraint_index] - constraints_upper_bounds[constraint_index]);
          }
          // otherwise, the constraint has both a lower and an upper bound. The sign of the multipliers determines the
          // complementarity pair
          else if (0. < multipliers.constraints[constraint_index]) { // lower bound
-            constraint_complementarity[constraint_index] = multipliers.constraints[constraint_index] * (constraints[constraint_index] - constraints_lower_bounds[constraint_index]);
+            return multipliers.constraints[constraint_index] * (constraints[constraint_index] - constraints_lower_bounds[constraint_index]);
          }
          else if (multipliers.constraints[constraint_index] < 0.) { // upper bound
-            constraint_complementarity[constraint_index] = multipliers.constraints[constraint_index] * (constraints[constraint_index] - constraints_upper_bounds[constraint_index]);
+            return multipliers.constraints[constraint_index] * (constraints[constraint_index] - constraints_upper_bounds[constraint_index]);
          }
-      }
-      return norm(residual_norm, variable_complementarity, constraint_complementarity);
+         return 0.;
+      };
+      return norm(residual_norm,
+         Range(this->model.number_variables), variable_lower_bound_complementarity,
+         Range(this->model.number_variables), variable_upper_bound_complementarity,
+         Range(this->model.number_constraints), constraint_complementarity);
    }
 
    SolutionStatus l1RelaxedProblem::check_first_order_convergence(const Iterate& current_iterate, double primal_tolerance,

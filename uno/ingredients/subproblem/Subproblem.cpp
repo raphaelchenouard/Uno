@@ -2,6 +2,7 @@
 // Licensed under the MIT license. See LICENSE file in the project directory for details.
 
 #include "Subproblem.hpp"
+#include "NewtonSystem.hpp"
 #include "ingredients/hessian_models/HessianModel.hpp"
 #include "ingredients/inertia_correction_strategies/InertiaCorrectionStrategy.hpp"
 #include "ingredients/subproblem_solvers/DirectSymmetricIndefiniteLinearSolver.hpp"
@@ -117,26 +118,34 @@ namespace uno {
       // unregularized Hessian-vector product
       this->problem.compute_hessian_vector_product(this->hessian_model, x, vector, current_iterate.multipliers, result);
 
-      // contribution of the regularization strategy
+      // contribution of the regularization strategy (same variables as the explicit regularized Hessian)
       const double regularization_factor = this->inertia_correction_strategy.get_primal_regularization_factor();
       if (0. < regularization_factor) {
-         // for (size_t variable_index: this->get_primal_regularization_variables()) { // TODO
-         for (size_t variable_index: Range(this->number_variables)) { // loop over all the variables for now
+         for (size_t variable_index: this->get_primal_regularization_variables()) {
             result[variable_index] += regularization_factor*vector[variable_index];
          }
       }
    }
 
+   bool Subproblem::requires_augmented_matrix_regularization() const {
+      return (!this->hessian_model.is_positive_definite() && this->performs_primal_regularization()) ||
+         this->inertia_correction_strategy.performs_dual_regularization();
+   }
+
+   Inertia Subproblem::expected_augmented_matrix_inertia() const {
+      const Inertia expected_inertia = this->problem.get_inertia();
+      if (expected_inertia.positive + expected_inertia.negative + expected_inertia.zero !=
+            this->number_variables + this->number_constraints) {
+         throw std::runtime_error("Mismatch in expected inertia");
+      }
+      return expected_inertia;
+   }
+
    void Subproblem::regularize_augmented_matrix(Statistics& statistics, double dual_regularization_parameter,
          DirectSymmetricIndefiniteLinearSolver<double>& linear_solver, BlockAugmentedMatrix block_augmented_matrix) const {
       // if regularization is required
-      if ((!this->hessian_model.is_positive_definite() && this->performs_primal_regularization()) ||
-            this->inertia_correction_strategy.performs_dual_regularization()) {
-         const Inertia expected_inertia = this->problem.get_inertia();
-         if (expected_inertia.positive + expected_inertia.negative + expected_inertia.zero !=
-               this->number_variables + this->number_constraints) {
-            throw std::runtime_error("Mismatch in expected inertia");
-         }
+      if (this->requires_augmented_matrix_regularization()) {
+         const Inertia expected_inertia = this->expected_augmented_matrix_inertia();
          this->inertia_correction_strategy.regularize_augmented_matrix(statistics, *this, dual_regularization_parameter,
             expected_inertia, linear_solver, block_augmented_matrix, this->get_primal_regularization_variables());
       }
@@ -147,28 +156,35 @@ namespace uno {
       }
    }
 
-   // (-(∇f(x_k) - ∇c(x_k) y_k), -c(x_k)) = (∇c(x_k) y_k - ∇f(x_k), -c(x_k))
-   void Subproblem::assemble_augmented_rhs(const Iterate& current_iterate, Evaluations& evaluations, Vector<double>& rhs) const {
-      rhs.fill(0.);
-      auto rhs_lagrangian = view(rhs.data(), this->number_variables);
-      auto rhs_constraints = view(rhs, this->number_variables, this->number_variables + this->number_constraints);
-
-      // -∇f(x_k)
-      this->problem.evaluate_objective_gradient(current_iterate, rhs_lagrangian, evaluations);
-      rhs_lagrangian.scale(-1.);
-
-      // +∇c(x_k) y_k
-      this->problem.add_jacobian_transposed_vector_product(current_iterate.multipliers.constraints.view(),
-         rhs_lagrangian, evaluations);
-
-      // constraints
-      this->problem.evaluate_constraints(current_iterate, rhs_constraints, evaluations);
-      rhs_constraints -= this->problem.get_constraints_lower_bounds();
-      rhs_constraints.scale(-1.);
+   bool Subproblem::regularize_singular_augmented_matrix(Statistics& statistics, double dual_regularization_parameter,
+         DirectSymmetricIndefiniteLinearSolver<double>& linear_solver, BlockAugmentedMatrix block_augmented_matrix) const {
+      if (this->requires_augmented_matrix_regularization()) {
+         return this->inertia_correction_strategy.regularize_singular_augmented_matrix(statistics, *this,
+            dual_regularization_parameter, this->expected_augmented_matrix_inertia(), linear_solver, block_augmented_matrix,
+            this->get_primal_regularization_variables());
+      }
+      return false;
    }
 
-   void Subproblem::assemble_primal_dual_direction(const Iterate& current_iterate, const Vector<double>& solution, Direction& direction) const {
-      this->problem.assemble_primal_dual_direction(current_iterate, solution, direction);
+   void Subproblem::refactorize_augmented_matrix(Statistics& statistics, double dual_regularization_parameter,
+         DirectSymmetricIndefiniteLinearSolver<double>& linear_solver, BlockAugmentedMatrix block_augmented_matrix) const {
+      if (this->requires_augmented_matrix_regularization()) {
+         this->inertia_correction_strategy.refactorize_augmented_matrix(statistics, *this, dual_regularization_parameter,
+            this->expected_augmented_matrix_inertia(), linear_solver, block_augmented_matrix,
+            this->get_primal_regularization_variables());
+      }
+      else { // no regularization: the regularization blocks are already zero
+         linear_solver.do_numerical_factorization(false);
+      }
+   }
+
+   void Subproblem::assemble_primal_dual_direction(const Iterate& current_iterate, const NewtonSystem& newton_system,
+         const Vector<double>& solution, Direction& direction) const {
+      this->problem.assemble_primal_dual_direction(current_iterate, newton_system, solution, direction);
+   }
+
+   std::unique_ptr<NewtonSystem> Subproblem::create_newton_system() const {
+      return this->problem.create_newton_system(this->hessian_model, this->inertia_correction_strategy.performs_dual_regularization());
    }
 
    BlockAugmentedMatrix Subproblem::compute_block_augmented_matrix(LinearSystem& linear_system) const {

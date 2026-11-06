@@ -22,13 +22,20 @@ namespace uno {
          // evaluate the gradients at the current point
          Vector<double> objective_gradient(this->model.number_variables);
          Vector<double> jacobian_values(this->model.number_jacobian_nonzeros());
+         bool gradients_evaluated = true;
          try {
             this->model.evaluate_objective_gradient(initial_primals, objective_gradient);
             this->model.evaluate_jacobian(initial_primals, jacobian_values.data());
-            this->scaling.compute(this->model, objective_gradient, jacobian_values);
          }
-         catch (const EvaluationError&) {
-            DEBUG << "The gradients could not be evaluated at the initial point, functions will not be scaled\n";
+         // any failure of the user callbacks (not only an EvaluationError) disables the scaling. If the failure persists,
+         // it is reported (and classified) by the evaluation of the initial iterate
+         catch (const std::exception& exception) {
+            DEBUG << "The gradients could not be evaluated at the initial point (" << exception.what() <<
+               "), functions will not be scaled\n";
+            gradients_evaluated = false;
+         }
+         if (gradients_evaluated) {
+            this->scaling.compute(this->model, objective_gradient, jacobian_values);
          }
       }
 
@@ -188,35 +195,35 @@ namespace uno {
       this->model.initial_primal_point(x);
    }
    
+   // the multipliers of the scaled problem are y_s = y * objective_scaling / constraint_scaling (inverse of the unscaling
+   // in postprocess_solution)
    void ScaledModel::initial_dual_point(Vector<double>& multipliers) const {
       this->model.initial_dual_point(multipliers);
+      const double objective_scaling = this->scaling.get_objective_scaling();
+      const auto& constraints_scaling = this->scaling.get_constraint_scaling();
+      for (size_t constraint_index: Range(this->number_constraints)) {
+         multipliers[constraint_index] *= objective_scaling / constraints_scaling[constraint_index];
+      }
    }
 
    void ScaledModel::postprocess_solution(Iterate& iterate, Evaluations& evaluations) const {
-      // unscale the constraints and the constraint multipliers
-      if (scaling.is_objective_scaled() || scaling.are_constraints_scaled()) {
-         const double objective_scaling = this->scaling.get_objective_scaling();
-         const auto& constraints_scaling = this->scaling.get_constraint_scaling();
-         for (size_t constraint_index: Range(this->model.number_constraints)) {
+      // unscale the multipliers, and the function values that are still valid (the others are evaluated on the
+      // original model by Uno::postprocess_solution)
+      const double objective_scaling = this->scaling.get_objective_scaling();
+      const auto& constraints_scaling = this->scaling.get_constraint_scaling();
+      if (evaluations.is_objective_computed) {
+         evaluations.objective /= objective_scaling;
+      }
+      for (size_t constraint_index: Range(this->model.number_constraints)) {
+         if (evaluations.are_constraints_computed) {
             evaluations.constraints[constraint_index] /= constraints_scaling[constraint_index];
-            iterate.multipliers.constraints[constraint_index] *= constraints_scaling[constraint_index] / objective_scaling;
          }
+         iterate.multipliers.constraints[constraint_index] *= constraints_scaling[constraint_index] / objective_scaling;
       }
-
-
-      // unscale the objective value and the bound multipliers
-      if (scaling.is_objective_scaled()) {
-         const double objective_scaling = this->scaling.get_objective_scaling();
-         if (evaluations.is_objective_computed) {
-            evaluations.objective /= objective_scaling;
-         }
-
-         for (size_t variable_index: Range(this->model.number_variables)) {
-            iterate.multipliers.lower_bounds[variable_index] /= objective_scaling;
-            iterate.multipliers.upper_bounds[variable_index] /= objective_scaling;
-         }
+      for (size_t variable_index: Range(this->model.number_variables)) {
+         iterate.multipliers.lower_bounds[variable_index] /= objective_scaling;
+         iterate.multipliers.upper_bounds[variable_index] /= objective_scaling;
       }
-
       this->model.postprocess_solution(iterate, evaluations);
    }
 
@@ -266,14 +273,14 @@ namespace uno {
 
    double ScaledModel::unscaled_primal_infeasibility(double /*scaled_primal_infeasibility*/,
          const Vector<double>& scaled_constraints, Norm residual_norm) const {
-      Vector<double> constraint_violation(scaled_constraints); // TODO preallocate
       const auto& constraint_scaling = this->scaling.get_constraint_scaling();
       const auto& lower_bounds = this->get_constraints_lower_bounds();
       const auto& upper_bounds = this->get_constraints_upper_bounds();
-      for (size_t constraint_index: Range(this->number_constraints)) {
-         constraint_violation[constraint_index] = this->constraint_violation(scaled_constraints[constraint_index],
+      // dematerialized vector
+      const auto constraint_violation = [&](size_t constraint_index) {
+         return this->constraint_violation(scaled_constraints[constraint_index],
             lower_bounds[constraint_index], upper_bounds[constraint_index]) / constraint_scaling[constraint_index];
-      }
-      return norm(residual_norm, constraint_violation);
+      };
+      return norm(residual_norm, Range(this->number_constraints), constraint_violation);
    }
 } // namespace

@@ -47,6 +47,7 @@ extern "C" {
    const uno_int UNO_EVALUATION_ERROR = 3;
    const uno_int UNO_ALGORITHMIC_ERROR = 4;
    const uno_int UNO_USER_TERMINATION = 5;
+   const uno_int UNO_USER_INTERRUPTION = 6;
 
    // Iterate status
    const uno_int UNO_NOT_OPTIMAL = 0;
@@ -61,7 +62,7 @@ extern "C" {
    // current Uno version
    const uno_int UNO_VERSION_MAJOR = 2;
    const uno_int UNO_VERSION_MINOR = 9;
-   const uno_int UNO_VERSION_PATCH = 0;
+   const uno_int UNO_VERSION_PATCH = 3;
 
    // options iterator
    typedef void* uno_options_iterator;
@@ -154,6 +155,7 @@ extern "C" {
    // takes as inputs the type of problem (UNO_PROBLEM_LINEAR, UNO_PROBLEM_QUADRATIC, or UNO_PROBLEM_NONLINEAR), the
    // number of variables, two arrays of lower and upper bounds of size "number_variables", and the vector indexing
    // (0 for C-style indexing, 1 for Fortran-style indexing).
+   // bounds (of variables and constraints) whose magnitude is at least 1e20 are infinite.
    void* uno_create_model(const char* problem_type, uno_int number_variables, const double* variables_lower_bounds,
       const double* variables_upper_bounds, uno_int base_indexing);
 

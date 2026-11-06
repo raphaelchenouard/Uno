@@ -7,7 +7,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "unopy"
-version = "0.4.14"
+version = "0.4.17"
 description = "With Uno, finally take full control of your SQP/barrier solver for nonlinearly constrained optimization"
 readme = "interfaces/Python/README.md"
 authors = [
@@ -23,9 +23,15 @@ dependencies = [
     "numpy",
 ]
 
+[project.optional-dependencies]
+test = ["pytest"]
+
 [project.urls]
 Repository = "https://github.com/cvanaret/Uno"
 Issues = "https://github.com/cvanaret/Uno/issues"
+
+[tool.pytest.ini_options]
+testpaths = ["interfaces/Python/tests"]
 
 [tool.scikit-build]
 cmake.source-dir = "."

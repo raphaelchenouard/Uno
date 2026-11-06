@@ -9,6 +9,7 @@
 #include "optimization/EvaluationErrors.hpp"
 #include "symbolic/Concatenation.hpp"
 #include "Uno.hpp"
+#include "tools/Infinity.hpp"
 
 namespace uno {
    PythonModel::PythonModel(const PythonUserModel& user_model):
@@ -16,7 +17,11 @@ namespace uno {
          static_cast<size_t>(user_model.number_variables), static_cast<size_t>(user_model.number_constraints),
          static_cast<double>(user_model.optimization_sense), static_cast<double>(user_model.lagrangian_sign_convention), 0),
          user_model(user_model),
-         nonlinear_constraints(this->number_constraints) {
+         nonlinear_constraints(this->number_constraints),
+         variables_lower_bounds(normalize_infinite_bounds(user_model.variables_lower_bounds)),
+         variables_upper_bounds(normalize_infinite_bounds(user_model.variables_upper_bounds)),
+         constraints_lower_bounds(normalize_infinite_bounds(user_model.constraints_lower_bounds)),
+         constraints_upper_bounds(normalize_infinite_bounds(user_model.constraints_upper_bounds)) {
       // partition equality/inequality constraints
       this->partition_constraints(this->equality_constraints, this->inequality_constraints);
    }
@@ -44,7 +49,7 @@ namespace uno {
    double PythonModel::evaluate_objective(const Vector<double>& x) const {
       double objective_value = 0.;
       if (this->user_model.objective_function.has_value()) {
-         const auto x_py = to_const_array(x.data(), this->number_variables);
+         const auto x_py = input_view(x.data(), this->number_variables);
 
          // evaluate objective
          try {
@@ -61,8 +66,8 @@ namespace uno {
 
    void PythonModel::evaluate_constraints(const Vector<double>& x, Vector<double>& constraints) const {
       if (this->user_model.constraint_functions.has_value()) {
-         const auto x_py = to_const_array(x.data(), this->number_variables);
-         auto constraints_py = to_array(constraints.data(), this->number_constraints);
+         const auto x_py = input_view(x.data(), this->number_variables);
+         auto constraints_py = output_view(constraints.data(), this->number_constraints);
 
          // evaluate constraints
          try {
@@ -77,8 +82,8 @@ namespace uno {
 
    void PythonModel::evaluate_objective_gradient(const Vector<double>& x, Vector<double>& gradient) const {
       if (this->user_model.objective_gradient.has_value()) {
-         const auto x_py = to_const_array(x.data(), this->number_variables);
-         auto gradient_py = to_array(gradient.data(), this->number_variables);
+         const auto x_py = input_view(x.data(), this->number_variables);
+         auto gradient_py = output_view(gradient.data(), this->number_variables);
 
          // evaluate objective gradient
          try {
@@ -118,8 +123,8 @@ namespace uno {
 
    void PythonModel::evaluate_jacobian(const Vector<double>& x, double* jacobian_values) const {
       if (this->user_model.jacobian.has_value()) {
-         const auto x_py = to_const_array(x.data(), this->number_variables);
-         auto jacobian_py = to_array(jacobian_values, this->number_jacobian_nonzeros());
+         const auto x_py = input_view(x.data(), this->number_variables);
+         auto jacobian_py = output_view(jacobian_values, this->number_jacobian_nonzeros());
 
          // evaluate Jacobian
          try {
@@ -140,9 +145,9 @@ namespace uno {
          if (this->user_model.lagrangian_sign_convention == UNO_MULTIPLIER_POSITIVE) {
             const_cast<Vector<double>&>(multipliers).scale(-1.);
          }
-         const auto x_py = to_const_array(x.data(), this->number_variables);
-         const auto multipliers_py = to_const_array(multipliers.data(), this->number_constraints);
-         auto hessian_py = to_array(hessian_values.data(), this->number_hessian_nonzeros());
+         const auto x_py = input_view(x.data(), this->number_variables);
+         const auto multipliers_py = input_view(multipliers.data(), this->number_constraints);
+         auto hessian_py = output_view(hessian_values.data(), this->number_hessian_nonzeros());
 
          // evaluate Lagrangian Hessian
          try {
@@ -168,9 +173,9 @@ namespace uno {
 
    void PythonModel::compute_jacobian_vector_product(const double* x, const double* vector, double* result) const {
       if (this->user_model.jacobian_operator.has_value()) {
-         const auto x_py = to_const_array(x, this->number_variables);
-         const auto vector_py = to_const_array(vector, this->number_variables);
-         auto result_py = to_array(result, this->number_constraints);
+         const auto x_py = input_view(x, this->number_variables);
+         const auto vector_py = input_view(vector, this->number_variables);
+         auto result_py = output_view(result, this->number_constraints);
 
          // evaluate Jacobian-vector product
          try {
@@ -187,9 +192,9 @@ namespace uno {
 
    void PythonModel::compute_jacobian_transposed_vector_product(const double* x, const double* vector, double* result) const {
       if (this->user_model.jacobian_transposed_operator.has_value()) {
-         const auto x_py = to_const_array(x, this->number_variables);
-         const auto vector_py = to_const_array(vector, this->number_constraints);
-         auto result_py = to_array(result, this->number_variables);
+         const auto x_py = input_view(x, this->number_variables);
+         const auto vector_py = input_view(vector, this->number_constraints);
+         auto result_py = output_view(result, this->number_variables);
 
          // evaluate Jacobian^T-vector product
          try {
@@ -212,10 +217,10 @@ namespace uno {
          if (this->user_model.lagrangian_sign_convention == UNO_MULTIPLIER_POSITIVE) {
             const_cast<Vector<double>&>(multipliers).scale(-1.);
          }
-         const auto x_py = to_const_array(x.data(), this->number_variables);
-         const auto multipliers_py = to_const_array(multipliers.data(), this->number_constraints);
-         const auto vector_py = to_const_array(vector.data(), this->number_variables);
-         auto result_py = to_array(result.data(), this->number_variables);
+         const auto x_py = input_view(x.data(), this->number_variables);
+         const auto multipliers_py = input_view(multipliers.data(), this->number_constraints);
+         const auto vector_py = input_view(vector.data(), this->number_variables);
+         auto result_py = output_view(result.data(), this->number_variables);
 
          // evaluate Hessian-vector product
          try {
@@ -235,19 +240,19 @@ namespace uno {
    }
 
    const std::vector<double>& PythonModel::get_variables_lower_bounds() const {
-      return this->user_model.variables_lower_bounds;
+      return this->variables_lower_bounds;
    }
 
    const std::vector<double>& PythonModel::get_variables_upper_bounds() const {
-      return this->user_model.variables_upper_bounds;
+      return this->variables_upper_bounds;
    }
 
    const std::vector<double>& PythonModel::get_constraints_lower_bounds() const {
-      return this->user_model.constraints_lower_bounds;
+      return this->constraints_lower_bounds;
    }
 
    const std::vector<double>& PythonModel::get_constraints_upper_bounds() const {
-      return this->user_model.constraints_upper_bounds;
+      return this->constraints_upper_bounds;
    }
 
    const std::vector<size_t>& PythonModel::get_equality_constraints() const {

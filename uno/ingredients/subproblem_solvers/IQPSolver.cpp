@@ -36,6 +36,11 @@ namespace uno {
 
       // solve the QP
       this->qp_solver->solve(statistics, initial_point, this->direction, warmstart_information);
+      // a solution with non-finite components (e.g. after a breakdown of the QP solver) cannot be used
+      if (this->direction.status != SubproblemStatus::ERROR && !this->direction.is_finite()) {
+         DEBUG << "The subproblem solution has non-finite components\n";
+         this->direction.status = SubproblemStatus::ERROR;
+      }
 
       // compute the dual direction
       compute_dual_direction(subproblem, current_iterate, this->direction.multipliers);
@@ -52,7 +57,8 @@ namespace uno {
       throw std::runtime_error("No SOC implemented in IQPSolver");
    }
 
-   const Direction& IQPSolver::compute_second_order_correction(const Subproblem& /*subproblem*/, const Iterate& /*current_iterate*/) {
+   const Direction& IQPSolver::compute_second_order_correction(Statistics& /*statistics*/, const Subproblem& /*subproblem*/,
+         const Iterate& /*current_iterate*/) {
       throw std::runtime_error("No SOC implemented in IQPSolver");
    }
 
@@ -61,7 +67,7 @@ namespace uno {
       throw std::runtime_error("No SOC implemented in IQPSolver");
    }
 
-   SolverWorkspace& IQPSolver::get_workspace() const {
+   const SolverWorkspace& IQPSolver::get_workspace() const {
       return this->qp_solver->get_workspace();
    }
 

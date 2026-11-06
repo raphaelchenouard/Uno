@@ -4,7 +4,7 @@
 cmake_minimum_required(VERSION 3.12)
 
 # define the project
-project(Uno VERSION 2.9.0
+project(Uno VERSION 2.9.3
         DESCRIPTION "Uno (Unifying Nonlinear Optimization)"
         LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
@@ -18,6 +18,7 @@ option(BUILD_SHARED_LIBS "Build using shared libraries" OFF)
 option(ENABLE_TESTS "Build unit tests" OFF)
 option(UNO_PYBIND11_DETAILED_ERRORS "Verbose pybind11 type-conversion error messages" OFF)
 option(USE_OPENMP "Build with OpenMP support" ON)
+option(UNO_WARNINGS_AS_ERRORS "Treat compiler warnings as errors in Uno's own code (not in third-party code)" OFF)
 
 if(NOT BUILD_STATIC_LIBS AND NOT BUILD_SHARED_LIBS)
    message(FATAL_ERROR "At least one of BUILD_SHARED_LIBS or BUILD_STATIC_LIBS must be ON.")
@@ -36,7 +37,7 @@ if (MSVC)
    add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:/utf-8>")
    # https://github.com/google/googletest/tree/main/googletest#visual-studio-dynamic-vs-static-runtimes
 else()
-   add_compile_options(-Wall -Wextra -Wnon-virtual-dtor -pedantic -Wunused-value -Wconversion)
+   add_compile_options(-Wall -Wextra "$<$<COMPILE_LANGUAGE:CXX>:-Wnon-virtual-dtor>" -pedantic -Wunused-value -Wconversion)
    set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG") # disable asserts
 endif()
 if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
@@ -64,6 +65,15 @@ target_include_directories(uno_dependencies INTERFACE
 
 if(ENABLE_TESTS)
    add_executable(run_unotest EXCLUDE_FROM_ALL)
+endif()
+
+# warnings as errors, only for Uno's own code: third-party code (e.g. GoogleTest) is not affected
+if(UNO_WARNINGS_AS_ERRORS)
+   set(UNO_WERROR_FLAG $<IF:$<CXX_COMPILER_ID:MSVC>,/WX,-Werror>)
+   target_compile_options(compiled_uno_files PRIVATE ${UNO_WERROR_FLAG})
+   if(ENABLE_TESTS)
+      target_compile_options(run_unotest PRIVATE ${UNO_WERROR_FLAG})
+   endif()
 endif()
 
 # ======================
@@ -100,8 +110,20 @@ target_sources(compiled_uno_files PRIVATE ${UNO_SOURCE_FILES})
 
 file(GLOB TESTS CONFIGURE_DEPENDS
    unotest/unotest.cpp
+   unotest/functional_tests/BarrierProblemTests.cpp
    unotest/functional_tests/BLASTests.cpp
+   unotest/functional_tests/BoundRelaxationTests.cpp
+   unotest/functional_tests/BoundRelaxationScalingTests.cpp
+   unotest/functional_tests/FinalEvaluationTests.cpp
+   unotest/functional_tests/InterruptTests.cpp
+   # parameterized over the available linear solvers (no test instantiated if none is available)
+   unotest/functional_tests/IterativeRefinementTests.cpp
    unotest/functional_tests/LAPACKTests.cpp
+   unotest/functional_tests/LBFGSTests.cpp
+   unotest/functional_tests/NewtonSystemTests.cpp
+   unotest/functional_tests/PostprocessingEvaluationsTests.cpp
+   unotest/functional_tests/ScaledObjectiveWithFixedVariableTests.cpp
+   unotest/functional_tests/SolveErrorBoundaryTests.cpp
    unotest/unit_tests/*.cpp
 )
 if(ENABLE_TESTS)
@@ -151,6 +173,13 @@ if(HSL_RUNTIME_LOADING)
    set(_compile_ma57 ON)
    set(_compile_ma27 ON)
    set(_compile_ma86 ON)
+   if(ENABLE_TESTS)
+      # stub HSL library (MA27 only) to test the runtime loading without the real libhsl
+      add_library(uno_hsl_stub SHARED EXCLUDE_FROM_ALL unotest/hsl_stub/hsl_stub.c)
+      add_dependencies(run_unotest uno_hsl_stub)
+      target_sources(run_unotest PRIVATE unotest/functional_tests/HSLRuntimeLoadingTests.cpp)
+      target_compile_definitions(run_unotest PRIVATE UNO_TEST_HSL_STUB_PATH="$<TARGET_FILE:uno_hsl_stub>")
+   endif()
 else()
    find_library(HSL hsl)
    if(HSL)
@@ -204,7 +233,9 @@ if(BQPD)
            uno/ingredients/subproblem_solvers/BQPD/BQPDSolver.cpp
            uno/ingredients/subproblem_solvers/BQPD/BQPDQuadraticProgram.cpp)
    if(ENABLE_TESTS)
-      target_sources(run_unotest PRIVATE unotest/functional_tests/BQPDSolverTests.cpp)
+      target_sources(run_unotest PRIVATE unotest/functional_tests/BQPDSolverTests.cpp
+         unotest/functional_tests/BQPDQuadraticProgramTests.cpp
+         unotest/functional_tests/SQPPathTests.cpp)
    endif()
 endif()
 
@@ -220,7 +251,8 @@ if(HIGHS)
            uno/ingredients/subproblem_solvers/HiGHS/HiGHSSolver.cpp
            uno/ingredients/subproblem_solvers/HiGHS/HiGHSQuadraticProgram.cpp)
    if(ENABLE_TESTS)
-      target_sources(run_unotest PRIVATE unotest/functional_tests/HiGHSSolverTests.cpp)
+      target_sources(run_unotest PRIVATE unotest/functional_tests/HiGHSSolverTests.cpp
+         unotest/functional_tests/HiGHSSQPTests.cpp)
    endif()
 
    message(STATUS "Found HIGHS")
@@ -345,6 +377,12 @@ if(APPLE)
    list(REMOVE_ITEM FORTRAN_LIBS heapt_w)
 endif()
 target_link_libraries(uno_dependencies INTERFACE ${FORTRAN_LIBS})
+# the Fortran runtime libraries are linked by name, but Uno's libraries and executables are linked by the C++ compiler,
+# which may not search the Fortran compiler's directories. This is the case for flang (FortranRuntime and FortranDecimal
+# live in the LLVM installation, e.g. /usr/lib/llvm-20/lib, which clang++ does not search).
+if(CMAKE_Fortran_COMPILER_ID STREQUAL "LLVMFlang" AND CMAKE_VERSION VERSION_GREATER_EQUAL 3.13)
+   target_link_directories(uno_dependencies INTERFACE ${CMAKE_Fortran_IMPLICIT_LINK_DIRECTORIES})
+endif()
 
 target_link_libraries(compiled_uno_files PUBLIC uno_dependencies)
 
@@ -459,6 +497,25 @@ if(ENABLE_TESTS)
 
    include(GoogleTest)
    gtest_discover_tests(run_unotest DISCOVERY_MODE PRE_TEST)
+
+   # end-to-end check of iterative refinement (pivoting tolerance increased at the first iteration) on Mittelmann's
+   # NARX_CFy instance. Requires the AMPL interface and the path to NARX_CFy.nl
+   set(UNO_NARX_CFY_NL "" CACHE FILEPATH "Path to Mittelmann's NARX_CFy.nl instance (optional end-to-end test)")
+   set(UNO_NARX_CFY_LINEAR_SOLVERS "MA57" CACHE STRING "Linear solvers tested on NARX_CFy (among MA27, MA57, MUMPS)")
+   if(AMPLSOLVER AND UNO_NARX_CFY_NL)
+      foreach(linear_solver ${UNO_NARX_CFY_LINEAR_SOLVERS})
+         # only the solvers that are compiled and that support the pivoting tolerance increase
+         if((linear_solver STREQUAL "MA57" AND _compile_ma57) OR (linear_solver STREQUAL "MA27" AND _compile_ma27) OR
+               (linear_solver STREQUAL "MUMPS" AND MUMPS_LIBRARY))
+            add_dependencies(run_unotest uno_ampl)
+            add_test(NAME NARX_CFy_iterative_refinement_${linear_solver}
+               COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/unotest/scripts/check_iterative_refinement_first_iteration.sh
+                  $<TARGET_FILE:uno_ampl> ${UNO_NARX_CFY_NL} ${linear_solver})
+         else()
+            message(STATUS "NARX_CFy iterative refinement test skipped for ${linear_solver} (solver not available)")
+         endif()
+      endforeach()
+   endif()
 endif()
 
 #########################################

@@ -1,8 +1,8 @@
-name: unopy example
+name: unopy examples
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main", "develop"]
     paths-ignore:
       - '*.md'
       - 'LICENSE'
@@ -11,7 +11,7 @@ on:
       - '*.yaml'
       - 'docs/**'
   pull_request:
-    branches: [ "main" ]
+    branches: ["main", "develop"]
     paths-ignore:
       - '*.md'
       - 'LICENSE'
@@ -51,8 +51,13 @@ jobs:
         run: bash dependencies/scripts/download_dependencies.sh
 
       - name: Compile and install unopy
-        run: CMAKE_BUILD_PARALLEL_LEVEL=$(nproc) pip install . -v -C cmake.define.UNO_PYBIND11_DETAILED_ERRORS=ON
+        run: CMAKE_BUILD_PARALLEL_LEVEL=$(nproc) pip install ".[test]" -v -C cmake.define.UNO_PYBIND11_DETAILED_ERRORS=ON
 
-      - name: Run example
-        working-directory: ${{github.workspace}}/interfaces/Python/example
-        run: python example_hs015.py
+      - name: Run tests
+        run: python -m pytest -v
+
+      - name: Run examples
+        working-directory: ${{github.workspace}}/interfaces/Python/examples
+        run: |
+          python example_hs015.py
+          python example_hs001.py

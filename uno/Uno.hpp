@@ -5,6 +5,7 @@
 #define UNO_H
 
 #include <memory>
+#include <optional>
 #include "ingredients/globalization_mechanisms/GlobalizationMechanism.hpp"
 #include "ingredients/globalization_strategies/GlobalizationStrategy.hpp"
 #include "optimization/Result.hpp"
@@ -33,15 +34,21 @@ namespace uno {
       std::unique_ptr<GlobalizationMechanism> globalization_mechanism{};
       std::string method_description{"strategy combination not initialized"};
 
-      [[nodiscard]] bool initialize(Statistics& statistics, const Model& model, Iterate& current_iterate,
-         EvaluationCache& evaluation_cache, const Options& options, std::vector<OptionOverride>& option_overrides);
+      // returns std::nullopt upon success, the termination status otherwise
+      [[nodiscard]] std::optional<OptimizationStatus> initialize(Statistics& statistics, const Model& model,
+         Iterate& current_iterate, EvaluationCache& evaluation_cache, const Options& options,
+         std::vector<OptionOverride>& option_overrides);
+      void discard_ingredients(const Model& model, Iterate& current_iterate, EvaluationCache& evaluation_cache);
       [[nodiscard]] static Statistics create_statistics(const Model& model, bool print_extended_statistics);
       [[nodiscard]] static bool check_termination(const Iterate& trial_iterate, size_t iteration, size_t max_iterations,
-         double current_time, double time_limit, OptimizationStatus& optimization_status, UserCallbacks& user_callbacks);
-      [[nodiscard]] Result uno_solve(const Model& model, const Options& options, UserCallbacks& user_callbacks);
-      static void postprocess_solution(const Model& model, Iterate& iterate, Evaluations& evaluations);
+         double current_time, double time_limit, bool user_interruption, OptimizationStatus& optimization_status,
+         UserCallbacks& user_callbacks);
+      [[nodiscard]] Result uno_solve(const Model& user_model, const Model& model, const Options& options,
+         UserCallbacks& user_callbacks);
+      [[nodiscard]] bool postprocess_solution(const Model& model, Iterate& iterate, Evaluations& evaluations) const;
       [[nodiscard]] Result create_result(const Model& model, OptimizationStatus optimization_status, Iterate&& solution,
          Evaluations&& evaluations, size_t major_iterations, const Timers& timers, std::vector<OptionOverride>&& option_overrides) const;
+      [[nodiscard]] Result create_failure_result(const Model& model, OptimizationStatus optimization_status, bool print_solution);
       static void postprocess_multipliers_signs(const Model& model, Result& result);
       void print_optimization_summary(const Result& result, bool print_solution) const;
    };

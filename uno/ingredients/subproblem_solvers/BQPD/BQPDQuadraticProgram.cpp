@@ -15,7 +15,10 @@
 #include "symbolic/Range.hpp"
 
 namespace uno {
-   #define BIG 1e30
+   namespace {
+      // BQPD has no notion of infinite bounds: infinite bounds are clamped to ±BQPD_infinite_bound
+      constexpr double BQPD_infinite_bound = 1e30;
+   } // namespace
 
    void BQPDQuadraticProgram::initialize_memory(const Subproblem& subproblem) {
       if (subproblem.has_curvature() && !subproblem.has_hessian_operator() && !subproblem.has_hessian_matrix()) {
@@ -86,8 +89,8 @@ namespace uno {
       }
       // replace INFs with large finite values (TODO: is that really useful?)
       for (size_t index: Range(this->number_variables + this->number_constraints)) {
-         this->lower_bounds[index] = std::max(-BIG, this->lower_bounds[index]);
-         this->upper_bounds[index] = std::min(BIG, this->upper_bounds[index]);
+         this->lower_bounds[index] = std::max(-BQPD_infinite_bound, this->lower_bounds[index]);
+         this->upper_bounds[index] = std::min(BQPD_infinite_bound, this->upper_bounds[index]);
       }
 
       // choose the Hessian representation for the gdotx callback. This mirrors the logic formerly in
@@ -121,6 +124,11 @@ namespace uno {
          const Vector<double>& hessian_values,
          const std::vector<double>& variables_lower_bounds, const std::vector<double>& variables_upper_bounds,
          const std::vector<double>& constraints_lower_bounds, const std::vector<double>& constraints_upper_bounds) {
+      // reject malformed data before anything is (re)allocated or written
+      QuadraticProgram::validate_coo_data(linear_objective, jacobian_row_indices, jacobian_column_indices, jacobian_values,
+         hessian_row_indices, hessian_column_indices, hessian_values, variables_lower_bounds, variables_upper_bounds,
+         constraints_lower_bounds, constraints_upper_bounds);
+
       // infer the dimensions from the data
       this->number_variables = linear_objective.size();
       this->number_constraints = constraints_lower_bounds.size();
@@ -135,12 +143,12 @@ namespace uno {
       this->lower_bounds.resize(this->number_variables + this->number_constraints);
       this->upper_bounds.resize(this->number_variables + this->number_constraints);
       for (size_t variable_index: Range(this->number_variables)) {
-         this->lower_bounds[variable_index] = std::max(-BIG, variables_lower_bounds[variable_index]);
-         this->upper_bounds[variable_index] = std::min(BIG, variables_upper_bounds[variable_index]);
+         this->lower_bounds[variable_index] = std::max(-BQPD_infinite_bound, variables_lower_bounds[variable_index]);
+         this->upper_bounds[variable_index] = std::min(BQPD_infinite_bound, variables_upper_bounds[variable_index]);
       }
       for (size_t constraint_index: Range(this->number_constraints)) {
-         this->lower_bounds[this->number_variables + constraint_index] = std::max(-BIG, constraints_lower_bounds[constraint_index]);
-         this->upper_bounds[this->number_variables + constraint_index] = std::min(BIG, constraints_upper_bounds[constraint_index]);
+         this->lower_bounds[this->number_variables + constraint_index] = std::max(-BQPD_infinite_bound, constraints_lower_bounds[constraint_index]);
+         this->upper_bounds[this->number_variables + constraint_index] = std::min(BQPD_infinite_bound, constraints_upper_bounds[constraint_index]);
       }
 
       // explicit Hessian (no operator) in the data-driven path; an empty Hessian means an LP
@@ -207,15 +215,8 @@ namespace uno {
 
    double BQPDQuadraticProgram::compute_hessian_quadratic_form(const Subproblem& subproblem, const Iterate& current_iterate,
          const Vector<double>& vector) const {
-      if (subproblem.has_hessian_operator()) { // linear operator
-         // TODO compute the quadratic form directly without temporary result
-         // compute Hv
-         subproblem.compute_hessian_vector_product(current_iterate, current_iterate.primals.view(), vector.view(),
-            this->hessian_vector_product.view());
-         // compute the dot product <v, Hv>
-         return dot(view(vector, 0, subproblem.number_variables), this->hessian_vector_product);
-      }
-      else if (subproblem.has_hessian_matrix()) { // explicit matrix
+      // use the same Hessian representation as the QP that was solved (selected in fill())
+      if (this->use_explicit_hessian) { // explicit (possibly regularized) matrix
          double quadratic_product = 0.;
          const size_t number_hessian_nonzeros = this->hessian_values.size();
          for (size_t nonzero_index: Range(number_hessian_nonzeros)) {
@@ -230,6 +231,14 @@ namespace uno {
             quadratic_product += factor * entry * vector[row_index] * vector[column_index];
          }
          return quadratic_product;
+      }
+      else if (subproblem.has_hessian_operator()) { // linear operator
+         // TODO compute the quadratic form directly without temporary result
+         // compute Hv
+         subproblem.compute_hessian_vector_product(current_iterate, current_iterate.primals.view(), vector.view(),
+            this->hessian_vector_product.view());
+         // compute the dot product <v, Hv>
+         return dot(view(vector, 0, subproblem.number_variables), this->hessian_vector_product);
       }
       else {
          throw std::runtime_error("The Lagrangian Hessian has no appropriate representation");

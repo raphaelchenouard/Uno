@@ -65,8 +65,9 @@ namespace uno {
       virtual void evaluate_jacobian(const Vector<double>& x, double* jacobian_values) const = 0;
 
       // numerical evaluations of Lagrangian gradient and Hessian
-      void evaluate_lagrangian_gradient(const Vector<double>& primals, const Multipliers& multipliers, double objective_multiplier,
-         Evaluations& evaluations, Vector<double>& lagrangian_gradient) const;
+      void evaluate_lagrangian_gradient(const Vector<double>& primals, const Vector<double>& constraint_multipliers,
+         const Vector<double>& lower_bound_multipliers, const Vector<double>& upper_bound_multipliers, double objective_multiplier,
+         Evaluations& evaluations, View<double> lagrangian_gradient) const;
       virtual void evaluate_lagrangian_hessian(const Vector<double>& x, double objective_multiplier, const Vector<double>& multipliers,
          View<double> hessian_values) const = 0;
 
@@ -116,7 +117,7 @@ namespace uno {
 
       void partition_constraints(std::vector<size_t>& equality_constraints, std::vector<size_t>& inequality_constraints) const;
 
-      [[nodiscard]] virtual double unscaled_objective(double objective_value) const;
+      [[nodiscard]] virtual double unscaled_objective(double scaled_objective) const;
       [[nodiscard]] virtual double unscaled_stationarity(double scaled_stationarity) const;
       [[nodiscard]] virtual double unscaled_complementarity(double scaled_complementarity) const;
       [[nodiscard]] virtual double unscaled_primal_infeasibility(double scaled_primal_infeasibility,
@@ -126,14 +127,14 @@ namespace uno {
    // compute ||c||
    template <typename Array>
    double Model::constraint_violation(const Array& constraints, Norm residual_norm) const {
-      Vector<double> constraint_violation(constraints.size()); // TODO preallocate
       const auto& lower_bounds = this->get_constraints_lower_bounds();
       const auto& upper_bounds = this->get_constraints_upper_bounds();
-      for (size_t constraint_index: Range(constraints.size())) {
-         constraint_violation[constraint_index] = this->constraint_violation(constraints[constraint_index], lower_bounds[constraint_index],
+      // dematerialized vector
+      const auto constraint_violation = [&](size_t constraint_index) {
+         return this->constraint_violation(constraints[constraint_index], lower_bounds[constraint_index],
             upper_bounds[constraint_index]);
-      }
-      return norm(residual_norm, constraint_violation);
+      };
+      return norm(residual_norm, Range(constraints.size()), constraint_violation);
    }
 } // namespace
 

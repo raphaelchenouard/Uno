@@ -29,7 +29,7 @@ namespace uno {
          radius_reset_threshold(options.get_double("TR_radius_reset_threshold")),
          primal_tolerance(options.get_double("primal_tolerance")),
          print_minor_iterations(options.get_bool("print_minor_iterations")) {
-      if (this->radius <= 0.) {
+      if (!(0. < this->radius)) {
          throw std::runtime_error("The trust-region radius should be positive");
       }
       if (this->increase_factor <= 1.) {
@@ -37,6 +37,9 @@ namespace uno {
       }
       if (this->decrease_factor <= 1.) {
          throw std::runtime_error("The trust-region decrease factor should be > 1");
+      }
+      if (this->aggressive_decrease_factor <= 1.) {
+         throw std::runtime_error("The trust-region aggressive decrease factor should be > 1");
       }
    }
 
@@ -58,6 +61,7 @@ namespace uno {
       this->reset_radius();
 
       size_t number_iterations = 0;
+      size_t number_consecutive_solver_errors = 0;
       bool termination = false;
       while (!termination) {
          bool is_acceptable = false;
@@ -72,7 +76,14 @@ namespace uno {
             // compute the direction within the trust region
             const Direction& direction = this->constraint_relaxation_strategy->compute_direction(statistics,
                current_iterate, this->radius, evaluation_cache.current_evaluations, warmstart_information);
-            if (direction.status == SubproblemStatus::INFEASIBLE) {
+            // a direction with non-finite components (e.g. after a breakdown of the subproblem solver) cannot be used
+            SubproblemStatus direction_status = direction.status;
+            if (direction_status != SubproblemStatus::INFEASIBLE && direction_status != SubproblemStatus::ERROR &&
+                  !direction.is_finite()) {
+               DEBUG << "The direction has non-finite components\n";
+               direction_status = SubproblemStatus::ERROR;
+            }
+            if (direction_status == SubproblemStatus::INFEASIBLE) {
                if (model.number_constraints == 0) {
                   throw std::runtime_error("The model is unconstrained but the iterate is infeasible, should not happen");
                }
@@ -87,18 +98,32 @@ namespace uno {
                   evaluation_cache.current_evaluations, warmstart_information);
                continue;
             }
-            assert(direction.status != SubproblemStatus::INFEASIBLE);
+            // the subproblem solver failed repeatedly on the optimality subproblem at an infeasible iterate: the failure
+            // does not depend on the radius. Solve the feasibility problem (a different subproblem) at the next TR
+            // iteration with the same radius, as the line search does
+            number_consecutive_solver_errors = (direction_status == SubproblemStatus::ERROR) ? number_consecutive_solver_errors + 1 : 0;
+            if (TrustRegionStrategy::max_consecutive_solver_errors <= number_consecutive_solver_errors &&
+                  0 < model.number_constraints && !this->constraint_relaxation_strategy->solving_feasibility_problem() &&
+                  this->primal_tolerance < current_iterate.scaled_residuals.primal_infeasibility) {
+               statistics.set("Status", "solver error");
+               DEBUG << "/!\\ The subproblem solver failed repeatedly, switching to the feasibility problem\n";
+               this->constraint_relaxation_strategy->switch_to_feasibility_problem(statistics, current_iterate,
+                  evaluation_cache.current_evaluations, warmstart_information);
+               number_consecutive_solver_errors = 0;
+               continue;
+            }
+            assert(direction_status != SubproblemStatus::INFEASIBLE);
             statistics.set("||Step||", direction.norm);
             warmstart_information.no_changes();
 
             // deal with errors in the subproblem
-            if (direction.status == SubproblemStatus::UNBOUNDED_PROBLEM) {
+            if (direction_status == SubproblemStatus::UNBOUNDED_PROBLEM) {
                // the subproblem is always bounded, but the objective may exceed a very large negative value
                statistics.set("Status", "unbounded subproblem");
                warmstart_information.trust_region_changed = true;
                this->decrease_radius_aggressively();
             }
-            else if (direction.status == SubproblemStatus::ERROR) {
+            else if (direction_status == SubproblemStatus::ERROR) {
                statistics.set("Status", "solver error");
                this->decrease_radius();
                // reset the Hessian representation of the subproblem solver
@@ -120,13 +145,18 @@ namespace uno {
                   set_dual_residuals_statistics(statistics, trial_iterate);
                   termination = true;
                }
-               else if (this->radius < this->minimum_radius) { // rejected, but small radius
-                  is_acceptable = this->check_termination_with_small_step(trial_iterate);
-                  termination = true;
-               }
-               if (!is_acceptable) {
+               else {
                   this->decrease_radius(direction.norm);
                   warmstart_information.trust_region_changed = true;
+                  // rejected step and small radius: try to terminate with a small step. The residuals of the rejected
+                  // trial iterate were not computed: test (and terminate at) the current iterate instead, from which the
+                  // trial iterate differs by a tiny step
+                  if (this->radius < this->minimum_radius && this->check_termination_with_small_step(current_iterate)) {
+                     trial_iterate = current_iterate;
+                     evaluation_cache.trial_evaluations = evaluation_cache.current_evaluations;
+                     is_acceptable = true;
+                     termination = true;
+                  }
                }
             }
          }
@@ -144,10 +174,15 @@ namespace uno {
             statistics.print_current_line();
          }
 
-         if (!is_acceptable && this->radius < this->minimum_radius) {
+         // written so that a NaN radius also terminates the loop
+         if (!is_acceptable && !(this->minimum_radius <= this->radius)) {
             throw std::runtime_error("Small radius");
          }
       }
+   }
+
+   void TrustRegionStrategy::postprocess_solution(Iterate& iterate, Evaluations& evaluations) const {
+      this->constraint_relaxation_strategy->postprocess_solution(iterate, evaluations);
    }
 
    std::string TrustRegionStrategy::get_name() const {
@@ -180,21 +215,23 @@ namespace uno {
       const PredictedReductionModels predicted_reduction_models =
          this->constraint_relaxation_strategy->build_predicted_reduction_models(current_iterate, direction,
          evaluation_cache.current_evaluations);
-      const ProgressMeasures predicted_reductions = predicted_reduction_models(/* step_length = */ 1.);
+      const ProgressMeasures predicted_reductions = predicted_reduction_models(/* step_length = */ 1.,
+         /* use_curvature_information = */ true);
       return this->constraint_relaxation_strategy->is_iterate_acceptable(statistics, model, current_iterate,
          trial_iterate, direction, 1., true, evaluation_cache.current_evaluations, evaluation_cache.trial_evaluations,
-         predicted_reductions, warmstart_information, user_callbacks);
+         predicted_reductions, warmstart_information, user_callbacks).accepted;
    }
 
-   // check whether a rejected step with very small norm can be tolerated
-   bool TrustRegionStrategy::check_termination_with_small_step(Iterate& trial_iterate) const {
+   // check whether the algorithm can terminate at an iterate (with computed residuals) after a rejected step with very
+   // small norm
+   bool TrustRegionStrategy::check_termination_with_small_step(Iterate& iterate) const {
       // terminate with a feasible point
-      if (trial_iterate.scaled_residuals.primal_infeasibility <= this->primal_tolerance) {
-         trial_iterate.status = SolutionStatus::FEASIBLE_SMALL_STEP;
+      if (iterate.scaled_residuals.primal_infeasibility <= this->primal_tolerance) {
+         iterate.status = SolutionStatus::FEASIBLE_SMALL_STEP;
          return true;
       }
-      else if (trial_iterate.objective_multiplier == 0.) { // terminate with an infeasible point
-         trial_iterate.status = SolutionStatus::INFEASIBLE_SMALL_STEP;
+      else if (this->constraint_relaxation_strategy->solving_feasibility_problem()) { // terminate with an infeasible point
+         iterate.status = SolutionStatus::INFEASIBLE_SMALL_STEP;
          return true;
       }
       else { // do not terminate, infeasible non stationary

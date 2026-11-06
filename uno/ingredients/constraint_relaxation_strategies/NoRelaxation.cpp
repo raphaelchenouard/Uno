@@ -18,8 +18,9 @@
 namespace uno {
    NoRelaxation::NoRelaxation(const Model& model, const Options& options):
          ConstraintRelaxationStrategy(options),
-         original_problem(model),
-         globalization_strategy(options) {
+         original_problem(model, options.get_double("residual_scaling_threshold")),
+         globalization_strategy(options),
+         least_square_multiplier_max_norm(options.get_double("least_square_multiplier_max_norm")) {
    }
 
    NoRelaxation::~NoRelaxation() = default;
@@ -37,13 +38,17 @@ namespace uno {
 
       // initial iterate
       this->inequality_handling_method->create_initial_iterate(initial_iterate, evaluation_cache.current_evaluations,
-         1000. /* TODO use option */);
+         this->least_square_multiplier_max_norm);
       this->inequality_handling_method->evaluate_progress_measures(initial_iterate, evaluation_cache.current_evaluations);
       this->inequality_handling_method->compute_residuals(initial_iterate, evaluation_cache.current_evaluations);
       this->globalization_strategy.initialize(statistics, initial_iterate);
 
       // statistics
       this->inequality_handling_method->initialize_statistics(statistics);
+   }
+
+   void NoRelaxation::postprocess_solution(Iterate& iterate, Evaluations& evaluations) const {
+      this->inequality_handling_method->postprocess_solution(iterate, evaluations);
    }
 
    const Direction& NoRelaxation::compute_direction(Statistics& statistics, Iterate& current_iterate,
@@ -53,6 +58,7 @@ namespace uno {
          current_iterate, current_evaluations);
       // if the problem definition changed, reset the globalization strategy and recompute the current auxiliary measure
       if (parameterization_updated) {
+         ++this->number_parameterization_updates;
          this->globalization_strategy.reset();
          this->inequality_handling_method->evaluate_progress_measures(current_iterate, current_evaluations); // TODO auxiliary
       }
@@ -85,8 +91,8 @@ namespace uno {
          trial_evaluations);
    }
 
-   const Direction& NoRelaxation::compute_second_order_correction(Iterate& current_iterate) {
-      return this->inequality_handling_method->compute_second_order_correction(current_iterate);
+   const Direction& NoRelaxation::compute_second_order_correction(Statistics& statistics, Iterate& current_iterate) {
+      return this->inequality_handling_method->compute_second_order_correction(statistics, current_iterate);
    }
 
    void NoRelaxation::update_second_order_corrections(const Iterate& trial_iterate, Evaluations& trial_evaluations) {
@@ -98,34 +104,42 @@ namespace uno {
       return this->inequality_handling_method->build_predicted_reduction_models(current_iterate, direction, current_evaluations);
    }
 
-   bool NoRelaxation::is_iterate_acceptable(Statistics& statistics, const Model& /*model*/, Iterate& current_iterate,
+   Decision NoRelaxation::is_iterate_acceptable(Statistics& statistics, const Model& /*model*/, Iterate& current_iterate,
          Iterate& trial_iterate, const Direction& direction, double /*step_length*/, bool uses_trust_region, Evaluations& current_evaluations,
          Evaluations& trial_evaluations, const ProgressMeasures& predicted_reductions, WarmstartInformation& warmstart_information,
          UserCallbacks& user_callbacks) {
-      const bool accept_iterate = this->inequality_handling_method->is_iterate_acceptable(statistics, this->globalization_strategy,
+      const Decision decision = this->inequality_handling_method->is_iterate_acceptable(statistics, this->globalization_strategy,
          current_iterate, trial_iterate, direction, trial_evaluations, predicted_reductions);
-      if (accept_iterate) {
+      if (decision.accepted) {
          this->inequality_handling_method->compute_residuals(trial_iterate, trial_evaluations);
          trial_iterate.status = this->check_termination(this->original_problem, trial_iterate, trial_evaluations);
          user_callbacks.notify_acceptable_iterate(trial_iterate.primals, trial_iterate.multipliers,
             this->original_problem.get_objective_multiplier(), trial_iterate.scaled_residuals.primal_infeasibility,
             trial_iterate.scaled_residuals.stationarity, trial_iterate.scaled_residuals.complementarity);
       }
-      if (uses_trust_region || accept_iterate) {
+      if (uses_trust_region || decision.accepted) {
          this->inequality_handling_method->notify_trial_iterate(statistics, current_iterate, trial_iterate, current_evaluations,
             trial_evaluations);
       }
       warmstart_information.no_changes();
-      return accept_iterate;
+      return decision;
    }
 
-   void NoRelaxation::accept_tiny_step(Statistics& statistics, const Model& /*model*/, Iterate& current_iterate,
-      Iterate& trial_iterate, const Direction& /*direction*/, double /*step_length*/, bool force_parameterization_update,
-      Evaluations& current_evaluations, Evaluations& trial_evaluations, WarmstartInformation& warmstart_information,
-      UserCallbacks& user_callbacks) {
+   void NoRelaxation::notify_step_limited_by(RejectionReason sole_rejection_reason) {
+      this->globalization_strategy.notify_step_limited_by(sole_rejection_reason);
+   }
+
+   bool NoRelaxation::accept_iterate_unconditionally(Statistics& statistics, const Model& /*model*/, Iterate& current_iterate,
+         Iterate& trial_iterate, const Direction& /*direction*/, double /*step_length*/, bool force_parameterization_update,
+         Evaluations& current_evaluations, Evaluations& trial_evaluations, WarmstartInformation& warmstart_information,
+         UserCallbacks& user_callbacks) {
       // update the parameterization first: the progress measures and the postprocessing of the trial iterate depend on it
-      if (force_parameterization_update && this->inequality_handling_method->force_parameterization_update(statistics)) {
+      const bool parameterization_updated = force_parameterization_update &&
+         this->inequality_handling_method->force_parameterization_update(statistics);
+      if (parameterization_updated) {
+         ++this->number_parameterization_updates;
          this->globalization_strategy.reset();
+         this->inequality_handling_method->evaluate_progress_measures(current_iterate, current_evaluations);
       }
       this->inequality_handling_method->accept_iterate_unconditionally(trial_iterate, trial_evaluations);
       this->inequality_handling_method->compute_residuals(trial_iterate, trial_evaluations);
@@ -136,6 +150,17 @@ namespace uno {
       this->inequality_handling_method->notify_trial_iterate(statistics, current_iterate, trial_iterate, current_evaluations,
          trial_evaluations);
       warmstart_information.no_changes();
+      return parameterization_updated;
+   }
+
+   bool NoRelaxation::terminate_at_line_search_failure(const Iterate& current_iterate, Iterate& trial_iterate,
+         const Evaluations& current_evaluations, Evaluations& trial_evaluations) {
+      return this->fall_back_after_line_search_failure(this->original_problem, current_iterate, trial_iterate,
+         current_evaluations, trial_evaluations);
+   }
+
+   double NoRelaxation::small_infeasibility_threshold() const {
+      return this->globalization_strategy.small_infeasibility_threshold();
    }
 
    std::string NoRelaxation::get_name() const {

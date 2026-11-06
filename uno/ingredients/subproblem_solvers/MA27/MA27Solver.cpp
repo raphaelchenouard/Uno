@@ -3,6 +3,8 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cmath>
+#include <limits>
 #include <stdexcept>
 #include "MA27Solver.hpp"
 
@@ -136,24 +138,28 @@ namespace uno {
          // initialize factor with the entries of the matrix. It will be modified by MA27BD
          std::copy_n(this->linear_system.matrix_values.data(), this->workspace.nnz, this->workspace.factor.begin());
 
-         int la = static_cast<int>(this->workspace.factor.size());
-         int liw = static_cast<int>(this->workspace.iw.size());
+         // LA and LIW must be passed unchanged to MA27CD: keep them in the workspace
+         this->workspace.la = static_cast<int>(this->workspace.factor.size());
+         this->workspace.liw = static_cast<int>(this->workspace.iw.size());
          MA27_numerical_factorization(&this->workspace.n, &this->workspace.nnz, this->linear_system.matrix_row_indices.data(),
-            this->linear_system.matrix_column_indices.data(), this->workspace.factor.data(), &la, this->workspace.iw.data(), &liw,
-            this->workspace.ikeep.data(), &this->workspace.nsteps, &this->workspace.maxfrt, this->workspace.iw1.data(),
-            this->workspace.icntl.data(), this->workspace.cntl.data(), this->workspace.info.data());
+            this->linear_system.matrix_column_indices.data(), this->workspace.factor.data(), &this->workspace.la,
+            this->workspace.iw.data(), &this->workspace.liw, this->workspace.ikeep.data(), &this->workspace.nsteps,
+            &this->workspace.maxfrt, this->workspace.iw1.data(), this->workspace.icntl.data(), this->workspace.cntl.data(),
+            this->workspace.info.data());
          factorization_done = true;
 
          if (MA27_INFO(1) == eIFLAG::INSUFFICIENTINTEGER) {
             DEBUG << "MA27: insufficient integer workspace, resizing and retrying. \n";
-            // increase the size of iw by 50%
-            this->workspace.iw.resize(static_cast<size_t>(3 * this->workspace.info[1] / 2));
+            // INFO(2) holds a size that may suffice: allocate 50% more (and grow in any case)
+            const size_t new_size = std::max(this->workspace.iw.size() + 1, static_cast<size_t>(3 * this->workspace.info[1] / 2));
+            this->workspace.iw.resize(new_size);
             factorization_done = false;
          }
          if (MA27_INFO(1) == eIFLAG::INSUFFICIENTREAL) {
             DEBUG << "MA27: insufficient real workspace, resizing and retrying. \n";
-            // increase the size of factor by 50%
-            this->workspace.factor.resize(static_cast<size_t>(3 * this->workspace.info[1] / 2));
+            // INFO(2) holds a size that may suffice: allocate 50% more (and grow in any case)
+            const size_t new_size = std::max(this->workspace.factor.size() + 1, static_cast<size_t>(3 * this->workspace.info[1] / 2));
+            this->workspace.factor.resize(new_size);
             factorization_done = false;
          }
       }
@@ -164,6 +170,16 @@ namespace uno {
 
    void MA27Solver::solve_indefinite_system(double* solution) {
       assert(this->factorization_performed);
+      // MA27CD has no error return: the solve is meaningful only if the factorization succeeded. Negative values of
+      // IFLAG (e.g. a singular matrix detected at a pivot step) leave an incomplete factorization; nonnegative values
+      // (success or warnings, such as rank deficiency) allow the solution of consistent systems.
+      // The callers may solve a system known to be singular (matrix_is_singular()) and reject non-finite solutions:
+      // the solution of an incomplete factorization is therefore NaN rather than an exception
+      if (MA27_INFO(1) < 0) {
+         DEBUG << "MA27: the factorization failed (IFLAG = " << MA27_INFO(1) << "), the solution is not computed\n";
+         std::fill_n(solution, static_cast<size_t>(this->workspace.n), std::numeric_limits<double>::quiet_NaN());
+         return;
+      }
 
       // copy rhs into solution (overwritten by MA27)
       const size_t dimension = static_cast<size_t>(this->workspace.n);
@@ -172,12 +188,6 @@ namespace uno {
       MA27_linear_solve(&this->workspace.n, this->workspace.factor.data(), &this->workspace.la, this->workspace.iw.data(),
          &this->workspace.liw, this->workspace.w.data(), &this->workspace.maxfrt, solution, this->workspace.iw1.data(),
          &this->workspace.nsteps, this->workspace.icntl.data(), this->workspace.info.data());
-
-      assert(MA27_INFO(1) == 0 && "MA27: the linear solve failed");
-      if (MA27_INFO(1) != 0) {
-         WARNING << "MA27 has issued a warning: IFLAG = " << MA27_INFO(1) << " additional info, IERROR = "
-            << this->workspace.info[1] << '\n';
-      }
    }
 
    Inertia MA27Solver::get_inertia() const {
@@ -203,6 +213,18 @@ namespace uno {
          static_cast<size_t>(this->workspace.info[1]) :
          static_cast<size_t>(this->workspace.n);
    }
+
+   bool MA27Solver::increase_pivoting_tolerance() {
+      const double current_tolerance = MA27_CNTL(1);
+      const auto new_tolerance = this->pivoting_tolerance_schedule.increase(current_tolerance);
+      if (!new_tolerance.has_value()) {
+         return false;
+      }
+      MA27_CNTL(1) = *new_tolerance;
+      DEBUG << "Increasing the MA27 pivoting tolerance from " << current_tolerance << " to " << MA27_CNTL(1) << '\n';
+      return true;
+   }
+
 
    LinearSystem& MA27Solver::get_linear_system() {
       return this->linear_system;

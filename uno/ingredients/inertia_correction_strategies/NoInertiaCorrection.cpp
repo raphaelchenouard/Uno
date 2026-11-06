@@ -16,15 +16,8 @@ namespace uno {
 
    void NoInertiaCorrection::regularize_hessian(Statistics& /*statistics*/, const Subproblem& /*subproblem*/,
          const Inertia& /*expected_inertia*/, DirectSymmetricIndefiniteLinearSolver<double>& /*linear_solver*/,
-         View<double> /*hessian_values*/) {
+         View<double> /*primal_regularization_values*/) {
       // do nothing
-   }
-
-   void NoInertiaCorrection::regularize_augmented_matrix(Statistics& /*statistics*/, const Subproblem& /*subproblem*/,
-         double /*dual_regularization_parameter*/, const Inertia& /*expected_inertia*/, BlockAugmentedMatrix block_augmented_matrix,
-         Range<> /*primal_regularization_variables*/) {
-      block_augmented_matrix.primal_inertia_correction.fill(0.);
-      block_augmented_matrix.dual_inertia_correction.fill(0.);
    }
 
    void NoInertiaCorrection::regularize_augmented_matrix(Statistics& /*statistics*/, const Subproblem& /*subproblem*/,

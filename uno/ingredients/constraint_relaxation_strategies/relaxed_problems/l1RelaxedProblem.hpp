@@ -13,14 +13,16 @@ namespace uno {
    class l1RelaxedProblem: public OptimizationProblem {
    public:
       l1RelaxedProblem(const Model& model, double objective_multiplier, double constraint_violation_coefficient,
-         bool relax_linear_constraints, bool use_proximal_term);
+         bool relax_linear_constraints, bool use_proximal_term, double residual_scaling_threshold);
       ~l1RelaxedProblem() override = default;
 
       [[nodiscard]] double get_objective_multiplier() const override;
       [[nodiscard]] bool has_inequality_constraints() const override;
       [[nodiscard]] bool has_bound_constraints() const override;
 
-      void set_proximal_coefficient(double proximal_coefficient);
+      void postprocess_solution(Iterate& iterate, Evaluations& evaluations) const override;
+
+      void set_proximal_coefficient(double new_proximal_coefficient);
       void set_proximal_center(View<const double> point);
 
       // sparsity patterns of Jacobian and Hessian
@@ -36,8 +38,9 @@ namespace uno {
       void evaluate_constraints(const Iterate& iterate, View<double> constraints, Evaluations& evaluations) const override;
       void evaluate_objective_gradient(const Iterate& iterate, View<double> objective_gradient, Evaluations& evaluations) const override;
       void evaluate_jacobian(const Vector<double>& primals, View<double> jacobian_values, Evaluations& evaluations) const override;
-      void evaluate_lagrangian_gradient(const Iterate& iterate, Evaluations& evaluations,
-         Vector<double>& lagrangian_gradient) const override;
+      void evaluate_lagrangian_gradient(const Vector<double>& primals, const Vector<double>& constraint_multipliers,
+         const Vector<double>& lower_bound_multipliers, const Vector<double>& upper_bound_multipliers, Evaluations& evaluations,
+         View<double> lagrangian_gradient) const override;
       void evaluate_lagrangian_hessian(Statistics& statistics, HessianModel& hessian_model, const Vector<double>& primal_variables,
          const Multipliers& multipliers, View<double> hessian_values) const override;
 
@@ -97,7 +100,7 @@ namespace uno {
 
       // delegating constructor
       l1RelaxedProblem(const Model& model, ElasticVariables&& elastic_variables, double objective_multiplier,
-         double constraint_violation_coefficient, bool use_proximal_term);
+         double constraint_violation_coefficient, bool use_proximal_term, double residual_scaling_threshold);
    };
 } // namespace
 

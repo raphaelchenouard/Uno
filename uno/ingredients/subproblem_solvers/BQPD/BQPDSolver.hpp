@@ -4,7 +4,10 @@
 #ifndef UNO_BQPDSOLVER_H
 #define UNO_BQPDSOLVER_H
 
+#include <algorithm>
 #include <array>
+#include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <vector>
 #include "../QPSolver.hpp"
@@ -55,13 +58,13 @@ namespace uno {
       [[nodiscard]] SolverWorkspace& get_workspace() override;
 
    private:
-      std::vector<double> lower_bounds{}, upper_bounds{}; // lower and upper bounds of variables and constraints
       // BQPD-native quadratic program (built by IQPSolver before each solve)
       std::unique_ptr<BQPDQuadraticProgram> quadratic_program{};
 
       int kmax{0};
       int (*pick_kmax)(size_t number_variables, size_t number_constraints);
       int mlp{1000};
+      static constexpr size_t max_number_workspace_increases{20};
       size_t nprof{};
       std::array<int, 100> info{};
       std::vector<double> alp{};
@@ -92,21 +95,24 @@ namespace uno {
       [[nodiscard]] static SubproblemStatus status_from_bqpd_status(BQPDStatus bqpd_status);
    };
 
+   // number of entries of lws (BQPD integer workspace) occupied by a hidden pointer
+   constexpr size_t hidden_pointer_size_in_lws = (sizeof(std::intptr_t) + sizeof(int) - 1) / sizeof(int);
+
    // hide a pointer to an arbitrary object at a given position of lws (BQPD integer workspace)
    template <typename T>
    void hide_pointer(size_t position_in_lws, int lws[], const T& object) {
-      intptr_t pointer_to_object = reinterpret_cast<intptr_t>(&object);
+      std::intptr_t pointer_to_object = reinterpret_cast<std::intptr_t>(&object);
       std::copy(reinterpret_cast<const char *>(&pointer_to_object),
-         reinterpret_cast<const char *>(&pointer_to_object) + sizeof(intptr_t),
-         reinterpret_cast<char *>(lws) + position_in_lws*sizeof(intptr_t));
+         reinterpret_cast<const char *>(&pointer_to_object) + sizeof(std::intptr_t),
+         reinterpret_cast<char *>(lws) + position_in_lws*sizeof(std::intptr_t));
    }
 
    // retrieve a pointer to an arbitrary object at a given position of lws (BQPD integer workspace)
    template <typename T>
    T* retrieve_pointer(size_t position_in_lws, const int lws[]) {
-      intptr_t pointer_to_object;
-      std::copy(reinterpret_cast<const char *>(lws) + position_in_lws*sizeof(intptr_t),
-         reinterpret_cast<const char *>(lws) + (position_in_lws+1)*sizeof(intptr_t),
+      std::intptr_t pointer_to_object;
+      std::copy(reinterpret_cast<const char *>(lws) + position_in_lws*sizeof(std::intptr_t),
+         reinterpret_cast<const char *>(lws) + (position_in_lws+1)*sizeof(std::intptr_t),
          reinterpret_cast<char *>(&pointer_to_object));
       T* object = reinterpret_cast<T*>(pointer_to_object);
       return object;

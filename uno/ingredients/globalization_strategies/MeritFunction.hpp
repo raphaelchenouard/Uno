@@ -14,8 +14,8 @@ namespace uno {
       explicit MeritFunction(const Options& options);
 
       void initialize(Statistics& statistics, const Iterate& initial_iterate) override;
-      [[nodiscard]] bool is_iterate_acceptable(Statistics& statistics, const ProgressMeasures& current_progress,
-            const ProgressMeasures& trial_progress, const ProgressMeasures& predicted_reductions, double objective_multiplier) override;
+      [[nodiscard]] Decision is_iterate_acceptable(Statistics& statistics, const ProgressMeasures& current_progress,
+         const ProgressMeasures& trial_progress, const ProgressMeasures& predicted_reductions, double objective_multiplier) override;
       [[nodiscard]] bool is_infeasibility_sufficiently_reduced(const Iterate& trial_iterate, double reference_infeasibility) const override;
       void reset() override;
       void avoid_cycling_back_to(const ProgressMeasures& current_progress) override;
@@ -25,9 +25,13 @@ namespace uno {
    protected:
       double smallest_known_infeasibility{Inf};
       const double sufficient_infeasibility_decrease_ratio;
+      // inverse penalty parameter τ ∈ (0, 1]: scales the optimality measure (objective + auxiliary) of the problem.
+      // Nonincreasing within a phase (set to 1 in initialize())
+      double inverse_penalty_parameter{1.};
+      const double infeasibility_reduction_fraction;
 
-      [[nodiscard]] static double constrained_merit_function(const ProgressMeasures& progress, double objective_multiplier);
-      [[nodiscard]] double compute_merit_actual_reduction(double current_merit_value, double trial_merit_value) const;
+      void update_inverse_penalty_parameter(const ProgressMeasures& predicted_reductions, double objective_multiplier);
+      [[nodiscard]] double merit_function(const ProgressMeasures& progress, double objective_multiplier) const;
    };
 } // namespace
 

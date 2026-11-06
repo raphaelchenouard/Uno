@@ -22,7 +22,9 @@ namespace uno {
    template <typename BarrierProblem>
    class BarrierParameterUpdateStrategy {
    public:
-      explicit BarrierParameterUpdateStrategy(const Options& options);
+      // unscaled_complementarity_factor: ratio between the unscaled and the scaled complementarity (inverse of the
+      // objective scaling)
+      explicit BarrierParameterUpdateStrategy(const Options& options, double unscaled_complementarity_factor = 1.);
       [[nodiscard]] const double& get_barrier_parameter() const;
       void set_barrier_parameter(double new_barrier_parameter);
       [[nodiscard]] bool update_barrier_parameter(const BarrierProblem& barrier_problem, const Iterate& current_iterate,
@@ -30,17 +32,23 @@ namespace uno {
       [[nodiscard]] bool force_barrier_parameter_decrease();
 
    protected:
+      static constexpr double minimal_barrier_parameter_safeguard{1e-11}; // IPOPT's default mu_min
       double barrier_parameter;
-      const double dual_tolerance;
+      const double minimal_barrier_parameter;
       const UpdateParameters parameters;
    };
 
    // class template implementation
 
    template <typename BarrierProblem>
-   BarrierParameterUpdateStrategy<BarrierProblem>::BarrierParameterUpdateStrategy(const Options& options):
+   BarrierParameterUpdateStrategy<BarrierProblem>::BarrierParameterUpdateStrategy(const Options& options,
+         double unscaled_complementarity_factor):
       barrier_parameter(options.get_double("barrier_initial_parameter")),
-      dual_tolerance(options.get_double("dual_tolerance")),
+      // the floor of the barrier parameter also respects the unscaled complementarity tolerance of the termination test,
+      // expressed in the scaled space (IPOPT: apply_obj_scaling(compl_inf_tol)). Otherwise, a small objective scaling makes
+      // the unscaled complementarity unreachable. It is safeguarded by IPOPT's default mu_min against tiny objective scalings
+      minimal_barrier_parameter(std::max(minimal_barrier_parameter_safeguard, std::min(options.get_double("dual_tolerance"),
+         options.get_double("tight_unscaled_complementarity_tolerance") / unscaled_complementarity_factor))),
       parameters({
          options.get_double("barrier_k_mu"),
          options.get_double("barrier_theta_mu"),
@@ -67,7 +75,8 @@ namespace uno {
          const Iterate& current_iterate, Evaluations& evaluations) {
       // primal-dual errors
       Vector<double> lag(barrier_problem.number_variables);
-      barrier_problem.evaluate_lagrangian_gradient(current_iterate, evaluations, lag);
+      barrier_problem.evaluate_lagrangian_gradient(current_iterate.primals, current_iterate.multipliers.constraints,
+         current_iterate.multipliers.lower_bounds, current_iterate.multipliers.upper_bounds, evaluations, lag.view());
       const double stationarity_error = norm_inf(lag);
       const double scaled_stationarity = stationarity_error / barrier_problem.compute_stationarity_scaling(current_iterate.multipliers);
       Vector<double> constraints(barrier_problem.number_constraints);
@@ -85,12 +94,12 @@ namespace uno {
          primal_feasibility << ", " << scaled_complementarity_error << "} = " << primal_dual_error << '\n';
 
       // update the barrier parameter (Eq. 7 in IPOPT paper)
-      const double tolerance_fraction = this->dual_tolerance / this->parameters.update_fraction;
+      const double barrier_parameter_threshold = this->minimal_barrier_parameter / this->parameters.update_fraction;
 
       bool parameter_updated = false;
       while (primal_dual_error <= this->parameters.k_epsilon * this->barrier_parameter) {
          const double old_barrier_parameter = this->barrier_parameter;
-         this->barrier_parameter = std::max(tolerance_fraction, std::min(this->parameters.k_mu * this->barrier_parameter,
+         this->barrier_parameter = std::max(barrier_parameter_threshold, std::min(this->parameters.k_mu * this->barrier_parameter,
             std::pow(this->barrier_parameter, this->parameters.theta_mu)));
          if (old_barrier_parameter <= this->barrier_parameter) {
             break;
@@ -114,9 +123,9 @@ namespace uno {
    // unconditional decrease (Eq. 7 in IPOPT paper), e.g. after consecutive tiny steps. Returns false if mu is already minimal
    template <typename BarrierProblem>
    bool BarrierParameterUpdateStrategy<BarrierProblem>::force_barrier_parameter_decrease() {
-      const double tolerance_fraction = this->dual_tolerance / this->parameters.update_fraction;
+      const double barrier_parameter_threshold = this->minimal_barrier_parameter / this->parameters.update_fraction;
       const double old_barrier_parameter = this->barrier_parameter;
-      this->barrier_parameter = std::max(tolerance_fraction, std::min(this->parameters.k_mu * this->barrier_parameter,
+      this->barrier_parameter = std::max(barrier_parameter_threshold, std::min(this->parameters.k_mu * this->barrier_parameter,
          std::pow(this->barrier_parameter, this->parameters.theta_mu)));
       DEBUG << "Barrier parameter mu forcefully updated to " << this->barrier_parameter << '\n';
       return (this->barrier_parameter < old_barrier_parameter);

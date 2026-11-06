@@ -2,8 +2,13 @@
 // Licensed under the MIT license. See LICENSE file in the project directory for details.
 
 #include <algorithm>
+#include <array>
 #include <cassert>
+#include <cstdint>
+#include <limits>
 #include <optional>
+#include <string>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 #include "MA57Solver.hpp"
@@ -61,12 +66,22 @@ namespace uno {
          return error_code == 11 || error_code == -4;
       }
 
+      // workspace size with a safety factor, clamped to the largest size MA57 (32-bit integers) can address
+      int get_initial_workspace_size(int size_estimate) {
+         const double size = MA57Settings::allocation_safety_factor * static_cast<double>(size_estimate);
+         return static_cast<int>(std::min(size, static_cast<double>(std::numeric_limits<int>::max())));
+      }
+
+      // geometric growth: the number of enlargements is logarithmic in the final size, even when the fill is much larger
+      // than the estimate of the analysis (e.g. many delayed pivots)
       int get_larger_workspace_size(int size_current, std::optional<int> size_estimate) {
-         const int size_new = std::max(size_current + 1, size_estimate.value_or(size_current));
-         const int oversize_denominator_with_estimate = 5;  // add 20% on top of the estimate
-         const int oversize_denominator_without_estimate = 2;  // grow by 50% if we don't have an estimate
-         const int oversize_denominator = size_estimate.has_value() ? oversize_denominator_with_estimate : oversize_denominator_without_estimate;
-         return size_new + size_new / oversize_denominator;
+         if (size_current == std::numeric_limits<int>::max()) {
+            throw std::runtime_error("MA57: the workspace cannot be enlarged further");
+         }
+         const auto size_current_64 = static_cast<int64_t>(size_current);
+         const auto size_estimate_64 = static_cast<int64_t>(size_estimate.value_or(0));
+         const int64_t size_new = std::max(2 * size_current_64, size_estimate_64 + size_estimate_64 / 5); // estimate + 20%
+         return static_cast<int>(std::min<int64_t>(size_new, std::numeric_limits<int>::max()));
       }
 
       int get_larger_real_workspace_size(const MA57Workspace& workspace) {
@@ -111,6 +126,7 @@ namespace uno {
       MA57_ICNTL(5) = 0; // suppress warning messages
       MA57_ICNTL(6) = 5; // pivot order (auto between METIS and MC47)
       MA57_ICNTL(7) = 1; // numerical pivoting (uses threshold in CNTL(1))
+      MA57_ICNTL(8) = 1; // insufficient workspace: suspend the factorization (INFO(1) = 10/11) instead of discarding it (-3/-4)
       MA57_ICNTL(11) = 16; // block size used by the Level 3 BLAS
       MA57_ICNTL(12) = 16; // assembly tree
       MA57_ICNTL(15) = use_scaling ? 1 : 0; // MC64 scaling
@@ -145,8 +161,8 @@ namespace uno {
       }
 
       // get LFACT and LIFACT and resize FACT and IFACT (no effect if resized to <= size)
-      this->workspace.lfact = static_cast<int>(MA57Settings::allocation_safety_factor * MA57_INFO(11));
-      this->workspace.lifact = static_cast<int>(MA57Settings::allocation_safety_factor * MA57_INFO(12));
+      this->workspace.lfact = get_initial_workspace_size(MA57_INFO(11));
+      this->workspace.lifact = get_initial_workspace_size(MA57_INFO(12));
       this->workspace.fact.resize(static_cast<size_t>(this->workspace.lfact));
       this->workspace.ifact.resize(static_cast<size_t>(this->workspace.lifact));
       this->analysis_performed = true;
@@ -163,6 +179,8 @@ namespace uno {
             &this->workspace.lkeep, this->workspace.keep.data(), this->workspace.iwork.data(), this->workspace.icntl.data(),
             this->workspace.cntl.data(), this->workspace.info.data(), this->workspace.rinfo.data());
 
+         // insufficient workspace: copy the factors into larger arrays (MA57ED). With ICNTL(8) = 1, the next call resumes the
+         // suspended factorization
          if (is_error_code_insufficient_real_workspace(MA57_INFO(1)) || is_error_code_insufficient_integer_workspace(MA57_INFO(1))) {
             const bool is_real_workspace = is_error_code_insufficient_real_workspace(this->workspace.info[0]);
 
@@ -172,7 +190,8 @@ namespace uno {
             std::vector<int> newifact(static_cast<size_t>(lnewifact));
             const int enlarge_target = is_real_workspace ? 0 : 1;
 
-            DEBUG << "Enlarging the MA57 workspace\n";
+            DEBUG << "Enlarging the MA57 " << (is_real_workspace ? "real" : "integer") << " workspace to " <<
+               (is_real_workspace ? lnewfact : lnewifact) << '\n';
             MA57_enlarge_workspace(&this->workspace.n, &enlarge_target, this->workspace.keep.data(), this->workspace.fact.data(),
                &this->workspace.lfact, newfact.data(), &lnewfact, this->workspace.ifact.data(), &this->workspace.lifact,
                newifact.data(), &lnewifact, this->workspace.info.data());
@@ -217,10 +236,19 @@ namespace uno {
          this->workspace.work.resize(static_cast<size_t>(this->workspace.lwork));
       }
 
+      // MA57CD overwrites INFO: use a copy, so that the diagnostics of the factorization (inertia, rank) are kept
+      std::array<int, 40> solve_info = this->workspace.info;
       MA57_linear_solve(&this->workspace.job, &this->workspace.n, this->workspace.fact.data(), &this->workspace.lfact,
          this->workspace.ifact.data(), &this->workspace.lifact, &nrhs, solution, &lrhs,
          this->workspace.work.data(), &this->workspace.lwork, this->workspace.iwork.data(), this->workspace.icntl.data(),
-         this->workspace.info.data());
+         solve_info.data());
+      // INFO(1) < 0: error (the solution is meaningless); INFO(1) > 0: warning
+      if (solve_info[0] < 0) {
+         throw std::runtime_error("MA57: the linear solve failed (INFO(1) = " + std::to_string(solve_info[0]) + ")");
+      }
+      if (0 < solve_info[0]) {
+         DEBUG << "MA57 has issued a warning during the linear solve: INFO(1) = " << solve_info[0] << '\n';
+      }
    }
 
    Inertia MA57Solver::get_inertia() const {
@@ -244,6 +272,18 @@ namespace uno {
    size_t MA57Solver::rank() const {
       return static_cast<size_t>(MA57_INFO(25));
    }
+
+   bool MA57Solver::increase_pivoting_tolerance() {
+      const double current_tolerance = MA57_CNTL(1);
+      const auto new_tolerance = this->pivoting_tolerance_schedule.increase(current_tolerance);
+      if (!new_tolerance.has_value()) {
+         return false;
+      }
+      MA57_CNTL(1) = *new_tolerance;
+      DEBUG << "Increasing the MA57 pivoting tolerance from " << current_tolerance << " to " << MA57_CNTL(1) << '\n';
+      return true;
+   }
+
 
    LinearSystem& MA57Solver::get_linear_system() {
       return this->linear_system;

@@ -5,6 +5,7 @@
 #define UNO_GLOBALIZATIONSTRATEGY_H
 
 #include <string>
+#include "Decision.hpp"
 
 namespace uno {
    // forward declarations
@@ -19,12 +20,19 @@ namespace uno {
       virtual ~GlobalizationStrategy();
 
       virtual void initialize(Statistics& statistics, const Iterate& initial_iterate) = 0;
-      [[nodiscard]] virtual bool is_iterate_acceptable(Statistics& statistics, const ProgressMeasures& current_progress,
+      [[nodiscard]] virtual Decision is_iterate_acceptable(Statistics& statistics, const ProgressMeasures& current_progress,
          const ProgressMeasures& trial_progress, const ProgressMeasures& predicted_reductions, double objective_multiplier) = 0;
+      // called by the globalization mechanism once a step is complete: sole_rejection_reason is the reason shared by all
+      // the rejected trial iterates of the step (NONE if no trial iterate was rejected or if the reasons differ)
+      virtual void notify_step_limited_by(RejectionReason /*sole_rejection_reason*/) { }
       [[nodiscard]] virtual bool is_infeasibility_sufficiently_reduced(const Iterate& trial_iterate,
          double reference_infeasibility) const = 0;
 
       virtual void reset() = 0;
+
+      // theta_min: below this infeasibility, the switching rule may declare f-type iterations. The line search uses the
+      // same threshold to compute its minimum step length (IPOPT, Wächter & Biegler 2006, eq. (23))
+      [[nodiscard]] virtual double small_infeasibility_threshold() const;
 
       virtual void avoid_cycling_back_to(const ProgressMeasures& current_progress) = 0;
 
@@ -35,8 +43,10 @@ namespace uno {
       const double armijo_tolerance;
       const bool protect_actual_reduction_against_roundoff;
       const double protected_actual_reduction_macheps_coefficient;
+      const double small_infeasibility_factor;
 
       [[nodiscard]] bool armijo_sufficient_decrease(double predicted_reduction, double actual_reduction) const;
+      [[nodiscard]] double compute_actual_reduction(double current_measure, double trial_measure) const;
    };
 } // namespace
 

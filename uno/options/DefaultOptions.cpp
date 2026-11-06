@@ -71,6 +71,9 @@ namespace uno {
       options.set_bool("print_minor_iterations", false);
       // whether the statistics table is printed in extended form
       options.set_bool("print_extended_statistics", false);
+      // dump KKT systems (only supported without low-rank corrections)
+      //options.set_string("dump_kkt_path", "");
+      options.set_integer("dump_kkt_frequency", 1);
 
       /** globalization strategy options **/
       options.set_double("armijo_decrease_fraction", 1e-4);
@@ -83,17 +86,22 @@ namespace uno {
 
       /** merit function options **/
       options.set_double("sufficient_infeasibility_decrease_ratio", 0.9);
+      options.set_double("merit_infeasibility_reduction_fraction", 0.1);
 
       /** filter method options **/
       options.set_double("filter_beta", 0.999);
       options.set_double("filter_gamma", 0.001);
       options.set_double("filter_ubd", 1e2);
       options.set_double("filter_fact", 1.25);
-      options.set_integer("filter_capacity", 50);
+      options.set_integer("filter_capacity", 50); // 0: unlimited
       // used by Waechter filter method
       options.set_double("filter_sufficient_infeasibility_decrease_factor", 0.9);
       options.set_integer("filter_reset_iteration_threshold", 5); // >= 1
       options.set_integer("max_number_filter_resets", 5); // >= 0
+      options.set_integer("filter_ubd_raise_trigger", 0); // 0: disabled
+      options.set_double("filter_ubd_raise_factor", 100.); // > 1
+      options.set_integer("filter_ubd_max_raises", 4);
+      options.set_double("filter_merit_max_increase", 5.); // orders of magnitude (IPOPT obj_max_inc)
       options.set_bool("filter_margin_uses_entry_infeasibility", false);
 
       /** funnel options **/
@@ -112,6 +120,10 @@ namespace uno {
       options.set_bool("LS_scale_duals_with_step_length", true);
       // safety factor for the minimum step length
       options.set_double("gamma_alpha", 0.05);
+      // watchdog: number of consecutive shortened steps that triggers the watchdog (0 disables it)
+      options.set_integer("LS_watchdog_shortened_iterations_trigger", 10);
+      // watchdog: maximum number of iterations in which the full step is accepted without globalization test
+      options.set_integer("LS_watchdog_max_trial_iterations", 3);
 
       /** Second-Order Corrections (SOC) options */
       // maximum number of SOC iterations
@@ -140,6 +152,17 @@ namespace uno {
       options.set_double("primal_regularization_slow_increase_factor", 8.);
       options.set_integer("threshold_unsuccessful_attempts", 8);
       options.set_bool("regularize_all_variables", true);
+
+      /** iterative refinement options (on the uncondensed Newton system) **/
+      // IPOPT: 1 (https://coin-or.github.io/Ipopt/OPTIONS.html#OPT_min_refinement_steps). 0: no refinement step when the
+      // solution is already accurate
+      options.set_integer("iterative_refinement_min_steps", 0);
+      // https://coin-or.github.io/Ipopt/OPTIONS.html#OPT_max_refinement_steps (unlike IPOPT, this is the exact maximum
+      // number of steps; 0 disables iterative refinement altogether)
+      options.set_integer("iterative_refinement_max_steps", 10);
+      options.set_double("iterative_refinement_residual_ratio_max", 1e-10);
+      options.set_double("iterative_refinement_residual_ratio_singular", 1e-5);
+      options.set_double("iterative_refinement_improvement_factor", 0.999999999);
 
       /** trust region options **/
       // initial trust region radius
