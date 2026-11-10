@@ -2,6 +2,7 @@
 // Licensed under the MIT license. See LICENSE file in the project directory for details.
 
 #include <limits>
+#include <utility>
 #include "Uno.hpp"
 #include "ingredients/constraint_relaxation_strategies/ConstraintRelaxationStrategyFactory.hpp"
 #include "ingredients/globalization_mechanisms/GlobalizationMechanismFactory.hpp"
@@ -13,12 +14,16 @@
 #include "ingredients/subproblem_solvers/LPSolverFactory.hpp"
 #include "ingredients/subproblem_solvers/SymmetricIndefiniteLinearSolverFactory.hpp"
 #include "../interfaces/C/Uno_C_API.h"
+#include "linear_algebra/Norm.hpp"
 #include "linear_algebra/Vector.hpp"
 #include "model/BoundRelaxedModel.hpp"
 #include "model/Model.hpp"
+#include "model/ModelReduction.hpp"
+#include "model/ReducedModel.hpp"
 #include "model/ScaledModel.hpp"
 #include "optimization/EvaluationCache.hpp"
 #include "optimization/EvaluationErrors.hpp"
+#include "optimization/UserTermination.hpp"
 #include "optimization/Iterate.hpp"
 #include "optimization/OptimizationStatus.hpp"
 #include "optimization/WarmstartInformation.hpp"
@@ -45,23 +50,23 @@ namespace uno {
 
       // the whole solve lifecycle (reformulations of the model included) is guarded: an error is reported in the Result
       try {
-         // the functions are scaled at the initial point
-         Vector<double> initial_primals(model.number_variables);
-         model.initial_primal_point(initial_primals);
-
-         // reformulate the model if:
-         // - the user wants an interior-point method with log barrier function
-         // - the model has bound constraints or inequality constraints
-         if (options.get_string("inequality_handling_method") == "interior_point" && options.get_string("barrier_function") == "log" &&
-               (model.has_bound_constraints() || model.has_inequality_constraints())) {
-            // slightly relax the bound constraints. As in IPOPT, the original (unscaled) bounds are relaxed: relaxing the
-            // scaled bounds would allow violations of the original constraints of up to relaxation/constraint scaling
-            const BoundRelaxedModel bound_relaxed_model(model, options);
-            const ScaledModel scaled_model(bound_relaxed_model, initial_primals, options);
-            return uno_solve(model, scaled_model, options, user_callbacks);
+         // eliminate the fixed variables. A removed constraint may not hide a violation that the solver would reject (the
+         // function scaling only shrinks the constraints)
+         ModelReduction reduction = ModelReduction::detect(model, 0.1 * options.get_double("primal_tolerance"));
+         // as in uno_solve, the evaluations of the preprocessing are not counted
+         model.reset_number_evaluations();
+         if (reduction.is_trivial()) {
+            return this->reformulate_and_solve(model, model, options, user_callbacks);
          }
-         const ScaledModel scaled_model(model, initial_primals, options);
-         return uno_solve(model, scaled_model, options, user_callbacks);
+         const ReducedModel reduced_model(model, std::move(reduction));
+         if (reduced_model.number_variables == 0) {
+            return this->evaluate_single_point(model, reduced_model, options);
+         }
+         return this->reformulate_and_solve(model, reduced_model, options, user_callbacks);
+      }
+      catch (const UserTermination& e) {
+         DISCRETE << e.what() << '\n';
+         return this->create_failure_result(model, OptimizationStatus::USER_TERMINATION, options.get_bool("print_solution"));
       }
       catch (const EvaluationError& e) {
          DISCRETE << "An evaluation error occurred: " << e.what() << '\n';
@@ -71,6 +76,61 @@ namespace uno {
          DISCRETE << "An error occurred: " << e.what() << '\n';
          return this->create_failure_result(model, OptimizationStatus::ALGORITHMIC_ERROR, options.get_bool("print_solution"));
       }
+   }
+
+   // user_model is the original model provided by the user, model is the possibly reduced model
+   Result Uno::reformulate_and_solve(const Model& user_model, const Model& model, const Options& options,
+         UserCallbacks& user_callbacks) {
+      // the functions are scaled at the initial point
+      Vector<double> initial_primals(model.number_variables);
+      model.initial_primal_point(initial_primals);
+
+      // reformulate the model if:
+      // - the user wants an interior-point method with log barrier function
+      // - the model has bound constraints or inequality constraints
+      if (options.get_string("inequality_handling_method") == "interior_point" && options.get_string("barrier_function") == "log" &&
+            (model.has_bound_constraints() || model.has_inequality_constraints())) {
+         // slightly relax the bound constraints. As in IPOPT, the original (unscaled) bounds are relaxed: relaxing the
+         // scaled bounds would allow violations of the original constraints of up to relaxation/constraint scaling
+         const BoundRelaxedModel bound_relaxed_model(model, options);
+         const ScaledModel scaled_model(bound_relaxed_model, initial_primals, options);
+         return uno_solve(user_model, scaled_model, options, user_callbacks);
+      }
+      const ScaledModel scaled_model(model, initial_primals, options);
+      return uno_solve(user_model, scaled_model, options, user_callbacks);
+   }
+
+   // all the variables were eliminated: the only point is a KKT point iff the remaining constraints are satisfied (their
+   // multipliers are 0, and the bound multipliers of the fixed variables absorb the stationarity)
+   Result Uno::evaluate_single_point(const Model& user_model, const Model& model, const Options& options) {
+      this->globalization_mechanism.reset();
+      this->method_description = "preprocessing (all variables eliminated)";
+      Timers timers;
+      timers.wallclock.start();
+      Iterate iterate(0, model.number_constraints);
+      Evaluations evaluations(model);
+      OptimizationStatus optimization_status = OptimizationStatus::SUCCESS;
+      try {
+         evaluations.evaluate_constraints(model, iterate.primals);
+         iterate.scaled_residuals.primal_infeasibility = model.constraint_violation(evaluations.constraints,
+            norm_from_string(options.get_string("residual_norm")));
+         iterate.scaled_residuals.stationarity = iterate.scaled_residuals.complementarity = 0.;
+         iterate.status = (iterate.scaled_residuals.primal_infeasibility <= options.get_double("primal_tolerance")) ?
+            SolutionStatus::FEASIBLE_KKT_POINT : SolutionStatus::INFEASIBLE_STATIONARY_POINT;
+      }
+      catch (const EvaluationError& error) {
+         DISCRETE << error.what() << '\n';
+         optimization_status = OptimizationStatus::EVALUATION_ERROR;
+      }
+      if (!this->postprocess_solution(user_model, model, iterate, evaluations) && optimization_status == OptimizationStatus::SUCCESS) {
+         optimization_status = OptimizationStatus::EVALUATION_ERROR;
+      }
+      timers.wallclock.stop();
+      Result result = this->create_result(user_model, optimization_status, std::move(iterate), std::move(evaluations), 0,
+         timers, {});
+      postprocess_multipliers_signs(user_model, result);
+      this->print_optimization_summary(result, options.get_bool("print_solution"));
+      return result;
    }
 
    // result of a solve that failed outside the optimization loop: no iterate is available
@@ -143,6 +203,9 @@ namespace uno {
             warmstart_information.iterate_changed();
             this->globalization_mechanism->compute_next_iterate(statistics, model, current_iterate, trial_iterate,
                evaluation_cache, warmstart_information, user_callbacks);
+            // stop when the same iterate is repeated (e.g. the tolerances cannot be reached)
+            this->globalization_mechanism->detect_stagnation(model, current_iterate, trial_iterate,
+               evaluation_cache.trial_evaluations);
             termination = check_termination(trial_iterate, major_iterations, max_iterations,
                statistics.timers.wallclock.get_elapsed_time(), time_limit, InterruptGuard::interrupt_requested(),
                optimization_status, user_callbacks);
@@ -151,6 +214,15 @@ namespace uno {
             std::swap(current_iterate, trial_iterate);
             std::swap(evaluation_cache.current_evaluations, evaluation_cache.trial_evaluations);
          }
+      }
+      // a user callback requested the termination: return the last accepted iterate
+      catch (const UserTermination& exception) {
+         statistics.start_new_line();
+         statistics.set("Status", "user termination");
+         statistics.set("Time", Timer::format_to_seconds(statistics.timers.wallclock.get_elapsed_time()));
+         if (Logger::level == INFO) statistics.print_current_line();
+         DEBUG << exception.what() << '\n';
+         optimization_status = OptimizationStatus::USER_TERMINATION;
       }
       // catch errors during the optimization process
       catch (std::exception& exception) {
@@ -162,16 +234,17 @@ namespace uno {
          optimization_status = OptimizationStatus::ALGORITHMIC_ERROR;
       }
 
-      const bool valid_final_evaluations = this->postprocess_solution(user_model, current_iterate,
-         evaluation_cache.current_evaluations);
+      // after a termination request, the user functions are not called again
+      const bool valid_final_evaluations = this->postprocess_solution(user_model, model, current_iterate,
+         evaluation_cache.current_evaluations, optimization_status != OptimizationStatus::USER_TERMINATION);
       // a successful solve whose function values could not be evaluated at the final iterate is not a success
       if (!valid_final_evaluations && optimization_status == OptimizationStatus::SUCCESS) {
          optimization_status = OptimizationStatus::EVALUATION_ERROR;
       }
       statistics.timers.wallclock.stop();
-      Result result = this->create_result(model, optimization_status, std::move(current_iterate),
+      Result result = this->create_result(user_model, optimization_status, std::move(current_iterate),
          std::move(evaluation_cache.current_evaluations), major_iterations, statistics.timers, std::move(option_overrides));
-      postprocess_multipliers_signs(model, result);
+      postprocess_multipliers_signs(user_model, result);
       this->print_optimization_summary(result, options.get_bool("print_solution"));
       return result;
    }
@@ -222,6 +295,12 @@ namespace uno {
             statistics.print_current_line();
          }
          return std::nullopt;
+      }
+      // a user callback requested the termination during the initialization
+      catch (const UserTermination& e) {
+         DISCRETE << e.what() << '\n';
+         this->discard_ingredients(model, current_iterate, evaluation_cache);
+         return OptimizationStatus::USER_TERMINATION;
       }
       // the functions could not be evaluated at the initial iterate
       catch (const EvaluationError& e) {
@@ -293,34 +372,65 @@ namespace uno {
    }
 
    // returns false if the objective or the constraints could not be evaluated at the final iterate. In that case, the
-   // corresponding values are set to NaN, so that stale or partially written values are never returned
-   bool Uno::postprocess_solution(const Model& user_model, Iterate& iterate, Evaluations& evaluations) const {
-      // 1. primal-dual postprocessing only (unscaling of the multipliers, removal of slacks, fixed variables, ...)
+   // corresponding values are set to NaN, so that stale or partially written values are never returned. If
+   // call_user_functions is false (after a termination request), the values that are not cached are not evaluated
+   bool Uno::postprocess_solution(const Model& user_model, const Model& model, Iterate& iterate, Evaluations& evaluations,
+         bool call_user_functions) const {
+      // 1. primal-dual postprocessing only (unscaling of the multipliers, removal of slacks, expansion of the reduced
+      // model, ...). Without ingredients (e.g. max_iterations = 0), the iterate lives in the space of the model
       if (this->globalization_mechanism != nullptr) {
          this->globalization_mechanism->postprocess_solution(iterate, evaluations);
+      }
+      else {
+         model.postprocess_solution(iterate, evaluations);
       }
       // 2. function values of the original model at the final primals. The postprocessing chain has either converted
       // the cached values to the units of the original model (ScaledModel) or invalidated them (e.g. snapped fixed
       // variables): only the invalidated values are evaluated, so that the user functions are not called again needlessly
       bool valid_evaluations = true;
-      try {
-         evaluations.evaluate_objective(user_model, iterate.primals);
-      }
-      catch (const std::exception& e) {
-         DISCRETE  << "The objective could not be evaluated at the final iterate: " << e.what()  << '\n';
+      const auto invalidate_objective = [&]() {
          evaluations.objective = std::numeric_limits<double>::quiet_NaN();
          evaluations.is_objective_computed = false;
          valid_evaluations = false;
-      }
-      try {
-         evaluations.evaluate_constraints(user_model, iterate.primals);
-      }
-      catch (const std::exception& e) {
-         DISCRETE  << "The constraints could not be evaluated at the final iterate: " << e.what()  << '\n';
+      };
+      const auto invalidate_constraints = [&]() {
          // the constraint vector may be stale or partially written
          evaluations.constraints.fill(std::numeric_limits<double>::quiet_NaN());
          evaluations.are_constraints_computed = false;
          valid_evaluations = false;
+      };
+      if (!call_user_functions) {
+         if (!evaluations.is_objective_computed) {
+            invalidate_objective();
+         }
+         if (!evaluations.are_constraints_computed && 0 < user_model.number_constraints) {
+            invalidate_constraints();
+         }
+      }
+      else {
+         try {
+            evaluations.evaluate_objective(user_model, iterate.primals);
+         }
+         // the run is over: a termination request only means that the value is not available
+         catch (const UserTermination& e) {
+            DISCRETE  << "The objective could not be evaluated at the final iterate: " << e.what()  << '\n';
+            invalidate_objective();
+         }
+         catch (const std::exception& e) {
+            DISCRETE  << "The objective could not be evaluated at the final iterate: " << e.what()  << '\n';
+            invalidate_objective();
+         }
+         try {
+            evaluations.evaluate_constraints(user_model, iterate.primals);
+         }
+         catch (const UserTermination& e) {
+            DISCRETE  << "The constraints could not be evaluated at the final iterate: " << e.what()  << '\n';
+            invalidate_constraints();
+         }
+         catch (const std::exception& e) {
+            DISCRETE  << "The constraints could not be evaluated at the final iterate: " << e.what()  << '\n';
+            invalidate_constraints();
+         }
       }
       DEBUG2 << "Final iterate:\n" << iterate;
       return valid_evaluations;

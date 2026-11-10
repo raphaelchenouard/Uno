@@ -110,6 +110,16 @@ To install the built libraries and headers:
 cmake --install build
 ```
 
+The installation includes a CMake package, so that a CMake project can use the installed Uno with `find_package`
+(set `CMAKE_PREFIX_PATH` to the installation prefix if it is not a default location):
+```cmake
+find_package(Uno REQUIRED)
+target_link_libraries(my_target PRIVATE Uno::uno)
+```
+`Uno::uno` is the static library if it was built, the shared library otherwise; `Uno::uno_static` and `Uno::uno_shared` select one explicitly.
+The headers are included as `#include "uno/Uno_C_API.h"`.
+The shared library is self-contained. The static library also requires the libraries Uno was built with, which are referenced by their absolute paths at build time, and the C++ linker (enable `CXX` in your project).
+
 To configure, compile and run the test suite:
 ```console
 cmake -S . -B build -DENABLE_TESTS=ON
@@ -136,8 +146,8 @@ You can pass the following options as `-DOPTION=value`:
 | `MA86`                 | path to the MA86 library                                                                                   | `path_to_libma86`           |
 | `HSL`                  | path to the HSL library                                                                                    | `path_to_libhsl`            |
 | `HSL_RUNTIME_LOADING`  | load HSL linear solvers at runtime via `dlopen`; requires `BUILD_SHARED_LIBS=ON`                           | `ON`, `OFF`                 |
-| `HIGHS`                | path to the HiGHS libraries (typically `libhighs` and `libhighs_extras`)                                   | `path_to_libhighs`          |
-| `HIGHS_INCLUDE_DIR`    | path to HiGHS include directory                                                                            | `path_to_highs_include_dir` |
+| `HIGHS`                | path to the HiGHS libraries (typically `libhighs` and `libhighs_extras`); overrides the autodetection      | `path_to_libhighs`          |
+| `HIGHS_INCLUDE_DIR`    | path to HiGHS include directory (used together with `HIGHS`)                                               | `path_to_highs_include_dir` |
 | `METIS`                | path to the METIS library                                                                                  | `path_to_libmetis`          |
 | `MUMPS_LIBRARY`        | path to the MUMPS library                                                                                  | `path_to_libdmumps`         |
 | `MUMPS_COMMON_LIBRARY` | path to the MUMPS common library                                                                           | `path_to_libmumps_common`   |
@@ -147,6 +157,11 @@ You can pass the following options as `-DOPTION=value`:
 | `SPRAL`                | path to SPRAL library </br> (requires `libhwloc` passed to `AUXILIARY_LIBRARIES`)                          | `path_to_libspral`          |
 | `SPRAL_INCLUDE_DIR`    | path to SPRAL include directory                                                                            | `path_to_spral_include_dir` |
 | `AUXILIARY_LIBRARIES`  | path(s) to additional libraries to link against, separated by `;` </br> (e.g., `libhwloc` and `libstdc++`) | `paths`                     |
+
+> [!NOTE]
+> HiGHS is detected automatically via its CMake package (`find_package(highs CONFIG)`), installed by HiGHS under `lib/cmake/highs`. If HiGHS is not in a standard location, add its installation prefix to `CMAKE_PREFIX_PATH`. The imported target `highs::highs` provides the include directories and the dependencies of HiGHS (`highs_extras`, BLAS, Threads and, if enabled, ZLIB). Since HiGHS relies on CBLAS, `BLAS_LIBRARIES` must contain a library that provides CBLAS (e.g., `libcblas;libblas` or OpenBLAS).
+>
+> To force a specific HiGHS build, or if the CMake package is not available (e.g., the `lib/cmake` directory was removed), pass the libraries and headers explicitly with `-DHIGHS=<libs>` and `-DHIGHS_INCLUDE_DIR=<dir>`. These variables take precedence over the CMake package. If neither is found, Uno falls back to searching for `libhighs` in the default library paths.
 
 > [!NOTE]
 > `-DHSL_RUNTIME_LOADING=ON` requires a shared build (`-DBUILD_SHARED_LIBS=ON`): the mode is meant to `dlopen` a shared library `libhsl` from a shared `libuno`, so a static-only build is rejected by CMake.
